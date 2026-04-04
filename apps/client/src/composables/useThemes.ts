@@ -681,10 +681,29 @@ export function useThemes() {
     return COLOR_REGEX.test(color) || RGBA_REGEX.test(color) || CSS.supports('color', color);
   };
 
-  const calculateContrast = (_color1: string, _color2: string): number => {
-    // Simplified contrast calculation
-    // In a real implementation, you'd use a proper color contrast library
-    return 4.5; // Placeholder
+  const calculateContrast = (color1: string, color2: string): number => {
+    // WCAG 2.1 relative luminance and contrast ratio calculation
+    const toLinear = (c: number): number => {
+      const s = c / 255;
+      return s <= 0.03928 ? s / 12.92 : Math.pow((s + 0.055) / 1.055, 2.4);
+    };
+    const hexToRgb = (hex: string): [number, number, number] | null => {
+      const match = hex.replace('#', '').match(/^([a-f\d]{2})([a-f\d]{2})([a-f\d]{2})$/i);
+      if (!match) return null;
+      return [parseInt(match[1], 16), parseInt(match[2], 16), parseInt(match[3], 16)];
+    };
+    const luminance = (hex: string): number | null => {
+      const rgb = hexToRgb(hex);
+      if (!rgb) return null;
+      const [r, g, b] = rgb.map(toLinear);
+      return 0.2126 * r + 0.7152 * g + 0.0722 * b;
+    };
+    const l1 = luminance(color1);
+    const l2 = luminance(color2);
+    if (l1 === null || l2 === null) return 4.5; // fallback to passing value if unparseable
+    const lighter = Math.max(l1, l2);
+    const darker = Math.min(l1, l2);
+    return (lighter + 0.05) / (darker + 0.05);
   };
 
   // localStorage functions

@@ -1,3 +1,5 @@
+import type { OrchestrationSnapshot } from './orchestrationTypes';
+
 // New interface for human-in-the-loop requests
 export interface HumanInTheLoop {
   question: string;
@@ -48,8 +50,8 @@ export interface FilterOptions {
 }
 
 export interface WebSocketMessage {
-  type: 'initial' | 'event' | 'hitl_response';
-  data: HookEvent | HookEvent[] | HumanInTheLoopResponse;
+  type: 'initial' | 'event' | 'hitl_response' | 'orchestration_state';
+  data: HookEvent | HookEvent[] | HumanInTheLoopResponse | OrchestrationSnapshot;
 }
 
 export type TimeRange = '1m' | '3m' | '5m' | '10m';

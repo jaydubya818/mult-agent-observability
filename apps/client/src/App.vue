@@ -4,10 +4,44 @@
     <header class="short:hidden bg-gradient-to-r from-[var(--theme-primary)] to-[var(--theme-primary-light)] shadow-lg border-b-2 border-[var(--theme-primary-dark)]">
       <div class="px-3 py-4 mobile:py-1.5 mobile:px-2 flex items-center justify-between mobile:gap-2">
         <!-- Title Section - Hidden on mobile -->
-        <div class="mobile:hidden">
-          <h1 class="text-2xl font-bold text-white drop-shadow-lg">
-            Multi-Agent Observability
-          </h1>
+        <div class="flex flex-col gap-2 min-w-0 mobile:min-w-0">
+          <div class="flex flex-wrap items-center gap-3 min-w-0">
+            <h1 class="text-xl sm:text-2xl font-bold text-white drop-shadow-lg truncate">
+              Multi-Agent Command Center
+            </h1>
+            <nav
+              class="flex shrink-0 rounded-lg bg-white/15 p-0.5 text-[11px] sm:text-sm font-semibold backdrop-blur border border-white/20"
+              aria-label="Primary views"
+            >
+              <button
+                type="button"
+                class="px-2.5 sm:px-3 py-1 rounded-md transition-colors"
+                :class="
+                  activeSurface === 'observe'
+                    ? 'bg-white text-[var(--theme-primary)] shadow'
+                    : 'text-white/90 hover:bg-white/10'
+                "
+                @click="activeSurface = 'observe'"
+              >
+                Observability
+              </button>
+              <button
+                type="button"
+                class="px-2.5 sm:px-3 py-1 rounded-md transition-colors"
+                :class="
+                  activeSurface === 'orchestrate'
+                    ? 'bg-white text-[var(--theme-primary)] shadow'
+                    : 'text-white/90 hover:bg-white/10'
+                "
+                @click="activeSurface = 'orchestrate'"
+              >
+                Orchestration
+              </button>
+            </nav>
+          </div>
+          <p class="hidden sm:block text-xs text-white/80 font-medium -mt-1">
+            Live hook telemetry + parallel agent control plane
+          </p>
         </div>
 
         <!-- Connection Status -->
@@ -63,6 +97,7 @@
       </div>
     </header>
     
+    <template v-if="activeSurface === 'observe'">
     <!-- Filters -->
     <FilterPanel
       v-if="showFilters"
@@ -108,6 +143,15 @@
       :stick-to-bottom="stickToBottom"
       @toggle="stickToBottom = !stickToBottom"
     />
+    </template>
+
+    <OrchestrationPanel
+      v-else
+      class="flex-1 min-h-0 flex flex-col overflow-hidden"
+      :snapshot="orchestration"
+      :hook-events="events"
+      @snapshot="onOrchestrationSnapshot"
+    />
     
     <!-- Error message -->
     <div
@@ -148,10 +192,18 @@ import LivePulseChart from './components/LivePulseChart.vue';
 import ThemeManager from './components/ThemeManager.vue';
 import ToastNotification from './components/ToastNotification.vue';
 import AgentSwimLaneContainer from './components/AgentSwimLaneContainer.vue';
+import OrchestrationPanel from './components/orchestration/OrchestrationPanel.vue';
 import { WS_URL } from './config';
+import type { OrchestrationSnapshot } from './orchestrationTypes';
 
 // WebSocket connection
-const { events, isConnected, error, clearEvents } = useWebSocket(WS_URL);
+const { events, orchestration, isConnected, error, clearEvents } = useWebSocket(WS_URL);
+
+const activeSurface = ref<'observe' | 'orchestrate'>('observe');
+
+function onOrchestrationSnapshot(snapshot: OrchestrationSnapshot) {
+  orchestration.value = snapshot;
+}
 
 // Theme management (sets up theme system)
 useThemes();

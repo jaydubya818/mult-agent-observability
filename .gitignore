@@ -271,3 +271,10 @@ ai_docs/haiku45/*
 trees/
 
 deep_docs
+
+# Stray JS files emitted next to Vue/TS sources (entry is main.ts)
+apps/client/src/**/*.js
+
+# Optional npm locks when using Bun in-repo
+apps/client/package-lock.json
+apps/server/package-lock.json

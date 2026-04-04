@@ -1,10 +1,23 @@
 import { Database } from 'bun:sqlite';
 import type { HookEvent, FilterOptions, Theme, ThemeSearchQuery } from './types';
 
-let db: Database;
+let db!: Database;
+let dbOpen = false;
 
-export function initDatabase(): void {
-  db = new Database('events.db');
+export function closeDatabase(): void {
+  if (!dbOpen) return;
+  try {
+    db.close();
+  } catch {
+    /* ignore */
+  }
+  dbOpen = false;
+}
+
+export function initDatabase(dbPath = 'events.db'): void {
+  closeDatabase();
+  db = new Database(dbPath);
+  dbOpen = true;
   
   // Enable WAL mode for better concurrent performance
   db.exec('PRAGMA journal_mode = WAL');
@@ -232,14 +245,16 @@ export function updateTheme(id: string, updates: Partial<Theme>): boolean {
   
   const values = Object.keys(updates)
     .filter(key => allowedFields.includes(key))
-    .map(key => {
+    .map((key): string | number => {
       if (key === 'colors' || key === 'tags') {
         return JSON.stringify(updates[key as keyof Theme]);
       }
       if (key === 'isPublic') {
         return updates[key as keyof Theme] ? 1 : 0;
       }
-      return updates[key as keyof Theme];
+      const raw = updates[key as keyof Theme];
+      if (raw === undefined || raw === null) return '';
+      return typeof raw === 'string' || typeof raw === 'number' ? raw : String(raw);
     });
   
   const stmt = db.prepare(`UPDATE themes SET ${setClause} WHERE id = ?`);

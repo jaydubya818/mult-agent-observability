@@ -10,7 +10,7 @@ import type { Theme, ThemeSearchQuery, ThemeValidationError, ApiResponse } from 
 
 // Utility functions
 function generateId(): string {
-  return Math.random().toString(36).substr(2, 16);
+  return crypto.randomUUID().replace(/-/g, '').slice(0, 16);
 }
 
 function validateTheme(theme: Partial<Theme>): ThemeValidationError[] {
@@ -118,7 +118,9 @@ function sanitizeTheme(theme: any): Partial<Theme> {
     description: theme.description?.toString().trim() || '',
     colors: theme.colors || {},
     isPublic: Boolean(theme.isPublic),
-    tags: Array.isArray(theme.tags) ? theme.tags.filter(tag => typeof tag === 'string' && tag.trim()) : [],
+    tags: Array.isArray(theme.tags)
+      ? theme.tags.filter((tag: unknown) => typeof tag === 'string' && tag.trim())
+      : [],
     authorId: theme.authorId?.toString() || null,
     authorName: theme.authorName?.toString() || null
   };

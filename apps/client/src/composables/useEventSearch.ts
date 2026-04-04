@@ -37,20 +37,26 @@ export function useEventSearch() {
       parts.push(event.session_id);
     }
 
-    // Model name
-    if (event.model) {
-      parts.push(event.model);
+    // Model name (top-level on HookEvent)
+    if (event.model_name) {
+      parts.push(event.model_name);
     }
 
-    // Tool information
-    if (event.tool_name) {
-      parts.push(event.tool_name);
-    }
-    if (event.tool_command) {
-      parts.push(event.tool_command);
-    }
-    if (event.tool_file && event.tool_file.path) {
-      parts.push(event.tool_file.path);
+    const payload = event.payload && typeof event.payload === 'object' ? event.payload : null;
+    if (payload) {
+      if (typeof payload.tool_name === 'string') {
+        parts.push(payload.tool_name);
+      }
+      const toolInput = payload.tool_input;
+      if (toolInput && typeof toolInput === 'object' && 'command' in toolInput && typeof (toolInput as { command: unknown }).command === 'string') {
+        parts.push((toolInput as { command: string }).command);
+      }
+      if (typeof (payload as { file_path?: string }).file_path === 'string') {
+        parts.push((payload as { file_path: string }).file_path);
+      }
+      if (typeof (payload as { path?: string }).path === 'string') {
+        parts.push((payload as { path: string }).path);
+      }
     }
 
     // Summary text
@@ -58,12 +64,9 @@ export function useEventSearch() {
       parts.push(event.summary);
     }
 
-    // HITL information
-    if (event.hitl_question) {
-      parts.push(event.hitl_question);
-    }
-    if (event.hitl_permission) {
-      parts.push(event.hitl_permission);
+    const hitl = event.humanInTheLoop;
+    if (hitl?.question) {
+      parts.push(hitl.question);
     }
 
     return parts.join(' ').toLowerCase();

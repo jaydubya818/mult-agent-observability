@@ -10,12 +10,15 @@ import {
   importTheme,
   getThemeStats 
 } from './theme';
+import { bootstrapOrchestration } from './orchestration/bootstrap';
 
 // Initialize database
 initDatabase();
 
 // Store WebSocket clients
 const wsClients = new Set<any>();
+
+const orchestration = bootstrapOrchestration(wsClients);
 
 // Helper function to send response to agent via WebSocket
 async function sendResponseToAgent(
@@ -111,19 +114,26 @@ const server = Bun.serve({
     // Handle CORS
     const headers = {
       'Access-Control-Allow-Origin': '*',
-      'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
-      'Access-Control-Allow-Headers': 'Content-Type',
+      'Access-Control-Allow-Methods': 'GET, POST, PUT, PATCH, DELETE, OPTIONS',
+      'Access-Control-Allow-Headers':
+        'Content-Type, Authorization, x-orchestration-admin-token',
     };
     
     // Handle preflight
     if (req.method === 'OPTIONS') {
       return new Response(null, { headers });
     }
+
+    const orchestrationResponse = await orchestration.handleOrchestrationFetch(req, url, headers);
+    if (orchestrationResponse) {
+      orchestration.notifyOrchestrationMutation(req.method, orchestrationResponse.status);
+      return orchestrationResponse;
+    }
     
     // POST /events - Receive new events
     if (url.pathname === '/events' && req.method === 'POST') {
       try {
-        const event: HookEvent = await req.json();
+        const event = (await req.json()) as HookEvent;
         
         // Validate required fields
         if (!event.source_app || !event.session_id || !event.hook_event_type || !event.payload) {
@@ -178,10 +188,17 @@ const server = Bun.serve({
 
     // POST /events/:id/respond - Respond to HITL request
     if (url.pathname.match(/^\/events\/\d+\/respond$/) && req.method === 'POST') {
-      const id = parseInt(url.pathname.split('/')[2]);
+      const idSegment = url.pathname.split('/')[2];
+      if (!idSegment) {
+        return new Response(JSON.stringify({ error: 'Event id is required' }), {
+          status: 400,
+          headers: { ...headers, 'Content-Type': 'application/json' },
+        });
+      }
+      const id = parseInt(idSegment, 10);
 
       try {
-        const response: HumanInTheLoopResponse = await req.json();
+        const response = (await req.json()) as HumanInTheLoopResponse;
         response.respondedAt = Date.now();
 
         // Update event in database
@@ -353,7 +370,13 @@ const server = Bun.serve({
     // GET /api/themes/:id/export - Export a theme
     if (url.pathname.match(/^\/api\/themes\/[^\/]+\/export$/) && req.method === 'GET') {
       const id = url.pathname.split('/')[3];
-      
+      if (!id) {
+        return new Response(JSON.stringify({ success: false, error: 'Theme ID is required' }), {
+          status: 400,
+          headers: { ...headers, 'Content-Type': 'application/json' },
+        });
+      }
+
       const result = await exportThemeById(id);
       if (!result.success) {
         const status = result.error?.includes('not found') ? 404 : 400;
@@ -427,6 +450,7 @@ const server = Bun.serve({
       // Send recent events on connection
       const events = getRecentEvents(300);
       ws.send(JSON.stringify({ type: 'initial', data: events }));
+      orchestration.sendOrchestrationStateToClient(ws);
     },
     
     message(ws, message) {
@@ -438,11 +462,6 @@ const server = Bun.serve({
       console.log('WebSocket client disconnected');
       wsClients.delete(ws);
     },
-    
-    error(ws, error) {
-      console.error('WebSocket error:', error);
-      wsClients.delete(ws);
-    }
   }
 });
 

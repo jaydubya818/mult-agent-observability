@@ -1,8 +1,10 @@
 import { ref, onMounted, onUnmounted } from 'vue';
 import type { HookEvent, WebSocketMessage } from '../types';
+import type { OrchestrationSnapshot } from '../orchestrationTypes';
 
 export function useWebSocket(url: string) {
   const events = ref<HookEvent[]>([]);
+  const orchestration = ref<OrchestrationSnapshot | null>(null);
   const isConnected = ref(false);
   const error = ref<string | null>(null);
   
@@ -30,14 +32,27 @@ export function useWebSocket(url: string) {
             const initialEvents = Array.isArray(message.data) ? message.data : [];
             // Only keep the most recent events up to maxEvents
             events.value = initialEvents.slice(-maxEvents);
+          } else if (message.type === 'orchestration_state') {
+            const raw = message.data as OrchestrationSnapshot;
+            orchestration.value = {
+              ...raw,
+              task_transitions: raw.task_transitions ?? [],
+              task_runs: (raw.task_runs ?? []).map((r) => ({
+                ...r,
+                run_id: r.run_id ?? r.task_id,
+                termination_reason: r.termination_reason ?? null,
+              })),
+              execution_policies: raw.execution_policies ?? [],
+              execution_environment_kind:
+                raw.execution_environment_kind ?? 'simulated',
+            };
           } else if (message.type === 'event') {
             const newEvent = message.data as HookEvent;
             events.value.push(newEvent);
             
             // Limit events array to maxEvents, removing the oldest when exceeded
             if (events.value.length > maxEvents) {
-              // Remove the oldest events (first 10) when limit is exceeded
-              events.value = events.value.slice(events.value.length - maxEvents + 10);
+              events.value = events.value.slice(-maxEvents);
             }
           }
         } catch (err) {
@@ -92,6 +107,7 @@ export function useWebSocket(url: string) {
 
   return {
     events,
+    orchestration,
     isConnected,
     error,
     clearEvents

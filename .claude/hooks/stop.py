@@ -76,13 +76,13 @@ def get_llm_completion_message():
     script_dir = Path(__file__).parent
     llm_dir = script_dir / "utils" / "llm"
 
-    # Try Anthropic second
-    if os.getenv("ANTHROPIC_API_KEY"):
-        anth_script = llm_dir / "anth.py"
-        if anth_script.exists():
+    # Try OpenAI first (highest priority)
+    if os.getenv("OPENAI_API_KEY"):
+        oai_script = llm_dir / "oai.py"
+        if oai_script.exists():
             try:
                 result = subprocess.run(
-                    ["uv", "run", str(anth_script), "--completion"],
+                    ["uv", "run", str(oai_script), "--completion"],
                     capture_output=True,
                     text=True,
                     timeout=10,
@@ -92,13 +92,13 @@ def get_llm_completion_message():
             except (subprocess.TimeoutExpired, subprocess.SubprocessError):
                 pass
 
-    # Try OpenAI first (highest priority)
-    if os.getenv("OPENAI_API_KEY"):
-        oai_script = llm_dir / "oai.py"
-        if oai_script.exists():
+    # Try Anthropic second
+    if os.getenv("ANTHROPIC_API_KEY"):
+        anth_script = llm_dir / "anth.py"
+        if anth_script.exists():
             try:
                 result = subprocess.run(
-                    ["uv", "run", str(oai_script), "--completion"],
+                    ["uv", "run", str(anth_script), "--completion"],
                     capture_output=True,
                     text=True,
                     timeout=10,

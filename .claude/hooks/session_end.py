@@ -13,6 +13,7 @@ import sys
 import subprocess
 from pathlib import Path
 from datetime import datetime
+from utils.constants import ensure_session_log_dir
 
 try:
     from dotenv import load_dotenv
@@ -23,9 +24,8 @@ except ImportError:
 
 def log_session_end(input_data, reason):
     """Log session end event to logs directory."""
-    # Ensure logs directory exists
-    log_dir = Path("logs")
-    log_dir.mkdir(parents=True, exist_ok=True)
+    session_id = input_data.get('session_id', 'unknown')
+    log_dir = ensure_session_log_dir(session_id)
     log_file = log_dir / 'session_end.json'
 
     # Read existing log data or initialize empty list
@@ -70,8 +70,7 @@ def save_session_statistics(input_data):
                 pass
 
         # Save statistics
-        stats_dir = Path("logs")
-        stats_dir.mkdir(parents=True, exist_ok=True)
+        stats_dir = ensure_session_log_dir(session_id)
         stats_file = stats_dir / 'session_statistics.json'
 
         if stats_file.exists():
