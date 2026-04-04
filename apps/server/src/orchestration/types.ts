@@ -70,6 +70,14 @@ export interface Agent {
   updated_at: number;
 }
 
+/** Derived from `payload.__orch_retry` for UI and API clarity (same source of truth in DB). */
+export interface TaskRetryState {
+  attempt: number;
+  max_attempts: number;
+  next_retry_at?: number;
+  last_failure_class?: string;
+}
+
 export interface Task {
   id: string;
   team_id: string;
@@ -81,6 +89,7 @@ export interface Task {
   payload: Record<string, unknown>;
   created_at: number;
   updated_at: number;
+  retry?: TaskRetryState;
 }
 
 export interface OrchestrationMessage {
@@ -136,6 +145,8 @@ export interface TaskRunRecord {
   agent_id?: string;
   environment_kind: string;
   status: TaskRunStatus;
+  /** 1-based execution attempt for this workload (aligned with task retry metadata). */
+  attempt: number;
   stdout_tail: string;
   stderr_tail: string;
   stdout_bytes: number;
@@ -196,6 +207,8 @@ export const OrchestrationHookEvents = {
   ExecutionPolicyRejected: 'OrchestrationExecutionPolicyRejected',
   TaskCancelled: 'OrchestrationTaskCancelled',
   TaskTimedOut: 'OrchestrationTaskTimedOut',
+  TaskRetryScheduled: 'OrchestrationTaskRetryScheduled',
+  TaskRetryExhausted: 'OrchestrationTaskRetryExhausted',
   AgentStatus: 'OrchestrationAgentStatus',
   Message: 'OrchestrationMessage',
   Metric: 'OrchestrationMetric',

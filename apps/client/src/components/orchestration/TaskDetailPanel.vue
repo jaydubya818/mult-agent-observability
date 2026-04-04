@@ -47,6 +47,15 @@
             <p v-if="task.assignee_agent_id" class="text-xs text-[var(--theme-text-tertiary)]">
               Assignee: {{ agentName(task.assignee_agent_id) }}
             </p>
+            <p v-if="task.retry" class="text-xs text-[var(--theme-text-secondary)] mt-2">
+              Retry: attempt {{ task.retry.attempt }} / {{ task.retry.max_attempts }}
+              <span v-if="task.retry.next_retry_at && task.retry.next_retry_at > Date.now()" class="text-[var(--theme-text-tertiary)]">
+                · next at {{ formatTs(task.retry.next_retry_at) }}
+              </span>
+              <span v-if="task.retry.last_failure_class" class="text-[var(--theme-text-tertiary)]">
+                · last {{ task.retry.last_failure_class }}
+              </span>
+            </p>
           </div>
 
           <div v-if="taskRun" class="rounded-lg border border-[var(--theme-border-secondary)] bg-[var(--theme-bg-secondary)]/50 p-3 space-y-2">
@@ -80,6 +89,8 @@
               <dd class="font-mono truncate">{{ executionEnvironmentKind }}</dd>
               <dt class="text-[var(--theme-text-tertiary)]">Run id</dt>
               <dd class="font-mono text-[10px] truncate" :title="taskRun.run_id">{{ shortRunId(taskRun.run_id) }}</dd>
+              <dt class="text-[var(--theme-text-tertiary)]">Attempt</dt>
+              <dd class="font-mono">{{ taskRun.attempt ?? 1 }}</dd>
               <dt class="text-[var(--theme-text-tertiary)]">Exit code</dt>
               <dd class="font-mono">{{ taskRun.exit_code ?? '—' }}</dd>
               <dt class="text-[var(--theme-text-tertiary)]">Termination</dt>

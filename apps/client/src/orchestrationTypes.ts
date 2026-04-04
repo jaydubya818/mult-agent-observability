@@ -55,6 +55,13 @@ export interface OrchestrationAgent {
   updated_at: number;
 }
 
+export interface TaskRetryState {
+  attempt: number;
+  max_attempts: number;
+  next_retry_at?: number;
+  last_failure_class?: string;
+}
+
 export interface OrchestrationTask {
   id: string;
   team_id: string;
@@ -64,6 +71,7 @@ export interface OrchestrationTask {
   priority: number;
   assignee_agent_id?: string;
   payload: Record<string, unknown>;
+  retry?: TaskRetryState;
   created_at: number;
   updated_at: number;
 }
@@ -121,6 +129,8 @@ export interface TaskRunRecord {
   agent_id?: string;
   environment_kind: string;
   status: TaskRunStatus;
+  /** 1-based execution attempt for this run (mirrors server). */
+  attempt: number;
   stdout_tail: string;
   stderr_tail: string;
   stdout_bytes: number;

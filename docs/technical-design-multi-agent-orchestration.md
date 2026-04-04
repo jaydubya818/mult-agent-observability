@@ -251,6 +251,43 @@ Env-configured retention prevents audit and task-run tables from growing without
 
 **Limitations:** Startup prune runs before traffic—brief extra work on boot. No per-tenant retention. Row caps are **global** for task runs (not per team). Trimming **deletes** run rows outright—UI may show “no execution record” for old tasks until re-run; this is intentional hygiene, not archival. For compliance archives, export DB or ship logs separately.
 
+### 6.4 Task execution retries (transient failures)
+
+Env-only policy today; leaves room for **per-team overrides** later without changing the payload contract.
+
+| Variable | Meaning |
+|----------|---------|
+| `ORCH_TASK_MAX_ATTEMPTS` | **Minimum 1.** Total execution attempts allowed per task dispatch cycle (default **1** = no retries; preserves pre-retry behavior). |
+| `ORCH_TASK_RETRY_BACKOFF_MS` | Base delay in milliseconds for **exponential** backoff before a failed task returns to `queued` (formula: `base * 2 ** (failedAttempt - 1)`). `0` = immediate re-queue (tests / aggressive retry). Default **1000**. |
+
+**Retryability matrix (workload terminal → auto-retry?):**
+
+| `WorkloadTerminalKind` | Retry? | Notes |
+|------------------------|--------|--------|
+| `process_error` | **Yes** | Non-zero exit, spawn error, generic failure path. |
+| `timed_out` | **Yes** | Treat as transient for operational hygiene (still bounded by `max_attempts`). |
+| `policy_rejected` | **No** | Configuration / intent; fix policy or payload. |
+| `user_cancelled` | **No** | Explicit operator signal. |
+| `engine_stopped` | **No** | Team/engine stopped; re-run only after explicit start. |
+| `success` | — | Terminal success clears retry metadata from the task row. |
+
+**State & data model:**
+
+- Bookkeeping lives in `orchestration_tasks.payload` under reserved key **`__orch_retry`**: `attempt` (1-based, last **started** run), `max_attempts`, optional `next_retry_at` (epoch ms), optional `last_failure_class`.
+- Snapshot **`Task.retry`** mirrors `__orch_retry` for clients (same numbers as payload).
+- `orchestration_task_runs.attempt` stores the **1-based attempt** for the current/last run row (pre-start rejections use `attempt = 0`).
+
+**Dispatch / queue:** Tasks in `queued` with `next_retry_at > now()` are **not** assigned to agents until the wall clock passes (simple contention-friendly “delay queue” without a separate scheduler).
+
+**Observability (hook event stream + metrics):**
+
+- **`OrchestrationTaskRetryScheduled`** — `attempt`, `max_attempts`, `next_retry_at`, `backoff_ms`, `failure_class`, `task_id`, `run_id`, …
+- **`OrchestrationTaskRetryExhausted`** — emitted only when **`ORCH_TASK_MAX_ATTEMPTS` > 1** and the final eligible failure occurs (`attempt` reaches cap); otherwise the task simply fails without this extra event (avoids noise for default single-attempt mode).
+- Existing per-attempt events still fire (`ExecutionFailed`, `ExecutionTimedOut`, etc.).
+- Metrics: `tasks_retry_scheduled`, `tasks_retry_exhausted` (counts).
+
+**Limitations:** No jitter; no per-task overrides from API yet; replacing `payload` via HTTP without preserving `__orch_retry` can drop retry state; not a workflow engine—no DAG or step-level retries.
+
 ---
 
 ## 7. UI views (contract)
@@ -328,11 +365,11 @@ When the active execution adapter is `local_process`, the effective policy for a
 | Outcome | Task status | Run row status | `termination_reason` (run) | Agent after |
 |---------|-------------|----------------|------------------------------|-------------|
 | Success | `done` | `completed` | `success` | `idle` |
-| Non‑zero exit / thrown spawn error | `failed` | `failed` | `process_error` | `idle` |
+| Non‑zero exit / thrown spawn error | `failed` (or `queued` transiently if retry scheduled §6.4) | `failed` until next attempt overwrites | `process_error` | `idle` when between attempts |
 | User cancel (HTTP cancel while running) | `cancelled` | `cancelled` | `user_cancelled` | `idle` |
 | Engine stop / team stopped (in-flight workload cancelled) | `cancelled` | `cancelled` | `engine_stopped` | `idle` |
 | Policy / concurrency reject (`local_process` evaluates before `ExecutionStarted`) | `failed` | `policy_rejected` | Human-readable reason in `termination_reason` / `error_message` | `idle` |
-| Per-task timeout (`ORCH_LP_MAX_MS`) | `timed_out` | `timed_out` | `timed_out` | `idle` |
+| Per-task timeout (`ORCH_LP_MAX_MS`) | `timed_out` (or `queued` if retry §6.4) | `timed_out` until next attempt | `timed_out` | `idle` between attempts |
 
 **Correlation in hook payloads:** synthetic events include `correlation_task_id`, `task_id`, `run_id`, `agent_id`, and `adapter_kind` where applicable so the UI can join task detail ↔ hook stream.
 
@@ -342,4 +379,4 @@ When the active execution adapter is `local_process`, the effective policy for a
 
 ---
 
-*Technical design v1.6*
+*Technical design v1.7*

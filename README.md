@@ -22,7 +22,7 @@ Before getting started, ensure you have the following installed:
 
 - **[Claude Code](https://docs.anthropic.com/en/docs/claude-code)** - Anthropic's official CLI for Claude
 - **[Astral uv](https://docs.astral.sh/uv/)** - Fast Python package manager (required for hook scripts)
-- **[Bun](https://bun.sh/)**, **npm**, or **yarn** - For running the server and client
+- **[Bun](https://bun.sh/)** - For running the server (install via `curl -fsSL https://bun.sh/install | bash`)
 - **[just](https://github.com/casey/just)** (optional) - Command runner for project recipes
 - **Anthropic API Key** - Set as `ANTHROPIC_API_KEY` environment variable
 - **OpenAI API Key** (optional) - For multi-model support with just-prompt MCP tool
@@ -399,14 +399,28 @@ just hook-test pre_tool_use
 Copy `.env.sample` to `.env` in the project root and fill in your API keys:
 
 **Application Root** (`.env` file):
-- `ANTHROPIC_API_KEY` – Anthropic Claude API key (required)
-- `ENGINEER_NAME` – Your name (for logging/identification)
-- `OPENAI_API_KEY` – OpenAI API key (optional)
-- `ELEVENLABS_API_KEY` – ElevenLabs API key (optional, for TTS)
+- `ANTHROPIC_API_KEY` – Anthropic Claude API key (required for LLM summarization)
+- `ENGINEER_NAME` – Your name (for personalized TTS completion messages)
+- `OPENAI_API_KEY` – OpenAI API key (optional, enables gpt-4.1-nano TTS + summaries)
+- `ELEVENLABS_API_KEY` – ElevenLabs API key (optional, highest-priority TTS)
 - `FIRECRAWL_API_KEY` – Firecrawl API key (optional, for web scraping)
+- `E2B_API_KEY` – E2B cloud sandbox key (optional, required for [Agent Sandbox Skill](https://github.com/disler/agent-sandbox-skill))
+
+**Hook behavior** (optional):
+- `CLAUDE_HOOKS_ENABLE_CACHING=1` – Cache model extraction per session to reduce transcript re-reads (default: off)
+
+**Orchestration local-process policy** (`ORCH_LP_*` env vars, all optional):
+- `ORCH_LP_CMD_ALLOWLIST` – Comma-separated list of allowed command basenames (default: all allowed)
+- `ORCH_LP_CMD_DENYLIST` – Extra commands to deny beyond built-in defaults (`curl`, `wget`, `ssh`, etc.)
+- `ORCH_LP_MAX_MS` – Max runtime per task in ms (default: `300000`)
+- `ORCH_LP_MAX_CONCURRENT` – Max concurrent subprocesses per team (default: `4`)
+- `ORCH_LP_CWD_ALLOWLIST` – Comma-separated root paths agents may use as cwd
+- `ORCH_LP_ALLOW_UNSPECIFIED_CWD` – Set to `0` to require agents to declare an explicit cwd (default: `1`)
+- `ORCH_LP_ENV_ALLOWLIST` – Comma-separated env key prefixes agents may inject
+- `ORCH_LP_MAX_OUTPUT_BYTES` – Max stdout+stderr bytes per run (default: `256000`)
 
 **Client** (`.env` file in `apps/client/.env`):
-- `VITE_MAX_EVENTS_TO_DISPLAY=100` – Maximum events to show (removes oldest when exceeded)
+- `VITE_MAX_EVENTS_TO_DISPLAY=300` – Maximum events shown in the timeline (oldest removed when exceeded)
 
 ### Server Ports
 
@@ -480,13 +494,15 @@ Beyond hook events, this codebase ships a **SQLite-backed orchestration layer** 
 
 - Server tests (orchestration): `cd apps/server && bun test src/orchestration`
 - Optional **retention** env: `ORCH_ADMIN_AUDIT_MAX_DAYS`, `ORCH_ADMIN_AUDIT_MAX_ROWS`, `ORCH_TASK_RUNS_MAX_DAYS`, `ORCH_TASK_RUNS_MAX_ROWS` (see design doc for precedence and what rows are eligible for pruning)
+- Optional **retry** env: `ORCH_TASK_MAX_ATTEMPTS` (default 1 = no retry), `ORCH_TASK_RETRY_BACKOFF_MS` (default 1000; exponential backoff before re-queue — see design doc §6.4)
 
 ## 🛡️ Security Features
 
-- Blocks dangerous `rm -rf` commands via `deny_tool()` JSON pattern (allowed only in specific directories)
+- Blocks dangerous `rm` commands via `deny_tool()` JSON pattern — uses both regex and `shlex`-based token parsing to catch all flag permutations (`rm -rf`, `rm -r -f`, `rm -v -r path -f`, `rm --recursive --force`, etc.); allowed only in whitelisted directories
 - Prevents access to sensitive files (`.env`, private keys)
 - `stop_hook_active` guard in `stop.py` and `subagent_stop.py` prevents infinite hook loops
 - Stop hook validators ensure plan files contain required sections before completion
+- Local-process execution policies enforce command allow/denylists, cwd roots, and output byte caps for orchestrated agents
 - Validates all inputs before execution
 
 ## 📊 Technical Stack

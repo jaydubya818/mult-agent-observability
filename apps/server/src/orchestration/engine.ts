@@ -20,6 +20,16 @@ import {
   updateAgent,
   updateTask,
 } from './repository';
+import {
+  computeRetryDelayMs,
+  getRetryMetaFromPayload,
+  isRetryableTerminal,
+  mergeRetryPayloadForNewAttempt,
+  mergeRetryPayloadForScheduledRetry,
+  readTaskRetryConfigFromEnv,
+  stripRetryFromPayload,
+  taskQueuedAndReadyForDispatch,
+} from './retryPolicy';
 import { ORCHESTRATION_HOOK_SOURCE, OrchestrationHookEvents, type Task } from './types';
 
 type TeamRuntime = {
@@ -173,7 +183,75 @@ export class OrchestrationEngine {
   }
 
   private pickTasks(teamId: string): Task[] {
-    return listTasksByTeam(teamId, 'queued');
+    return listTasksByTeam(teamId, 'queued').filter((t) => taskQueuedAndReadyForDispatch(t));
+  }
+
+  private tryScheduleRetryAfterFailure(input: {
+    teamId: string;
+    taskId: string;
+    agentId: string;
+    terminal: WorkloadTerminalKind;
+    runId: string;
+    executionStarted: boolean;
+  }): boolean {
+    if (!input.executionStarted) return false;
+    if (!isRetryableTerminal(input.terminal)) return false;
+
+    const cfg = readTaskRetryConfigFromEnv();
+    const taskNow = getTaskById(input.taskId);
+    if (!taskNow) return false;
+    const meta = getRetryMetaFromPayload(taskNow.payload);
+    const currentAttempt = meta?.attempt ?? 1;
+
+    if (currentAttempt >= cfg.max_attempts) {
+      if (cfg.max_attempts > 1) {
+        this.emitHook(input.teamId, OrchestrationHookEvents.TaskRetryExhausted, {
+          team_id: input.teamId,
+          task_id: input.taskId,
+          agent_id: input.agentId,
+          run_id: input.runId,
+          attempt: currentAttempt,
+          max_attempts: cfg.max_attempts,
+          failure_class: input.terminal,
+          adapter_kind: this.env.kind,
+          correlation_task_id: input.taskId,
+        });
+        recordMetric({ team_id: input.teamId, key: 'tasks_retry_exhausted', value: 1, unit: 'count' });
+      }
+      return false;
+    }
+
+    const delay = computeRetryDelayMs(currentAttempt, cfg.backoff_ms);
+    const nextAt = Date.now() + delay;
+    const nextPayload = mergeRetryPayloadForScheduledRetry(taskNow.payload, {
+      attempt: currentAttempt,
+      max_attempts: cfg.max_attempts,
+      next_retry_at: nextAt,
+      last_failure_class: input.terminal,
+    });
+
+    updateAgent(input.agentId, { status: 'idle', current_task_id: undefined });
+    updateTask(input.taskId, {
+      status: 'queued',
+      assignee_agent_id: undefined,
+      payload: nextPayload,
+    });
+
+    this.emitHook(input.teamId, OrchestrationHookEvents.TaskRetryScheduled, {
+      team_id: input.teamId,
+      task_id: input.taskId,
+      agent_id: input.agentId,
+      run_id: input.runId,
+      attempt: currentAttempt,
+      max_attempts: cfg.max_attempts,
+      next_retry_at: nextAt,
+      backoff_ms: delay,
+      failure_class: input.terminal,
+      adapter_kind: this.env.kind,
+      correlation_task_id: input.taskId,
+    });
+    recordMetric({ team_id: input.teamId, key: 'tasks_retry_scheduled', value: 1, unit: 'count' });
+    return true;
   }
 
   private async tick(teamId: string): Promise<void> {
@@ -246,12 +324,19 @@ export class OrchestrationEngine {
         {
           onBegin: () => {
             executionStarted = true;
+            const cfg = readTaskRetryConfigFromEnv();
+            const t = getTaskById(task.id);
+            const prevMeta = getRetryMetaFromPayload(t?.payload);
+            const nextAttempt = (prevMeta?.attempt ?? 0) + 1;
+            const mergedPayload = mergeRetryPayloadForNewAttempt(t?.payload ?? {}, nextAttempt, cfg.max_attempts);
+            updateTask(task.id, { payload: mergedPayload });
             startTaskRun({
               task_id: task.id,
               run_id: runId,
               team_id: teamId,
               agent_id: agent.id,
               environment_kind: this.env.kind,
+              attempt: nextAttempt,
             });
             this.emitHook(teamId, OrchestrationHookEvents.ExecutionStarted, {
               team_id: teamId,
@@ -399,7 +484,11 @@ export class OrchestrationEngine {
 
             if (terminal === 'success') {
               updateAgent(agent.id, { status: 'idle', current_task_id: undefined });
-              updateTask(task.id, { status: 'done' });
+              const doneTask = getTaskById(task.id);
+              updateTask(task.id, {
+                status: 'done',
+                payload: stripRetryFromPayload(doneTask?.payload ?? {}),
+              });
               this.emitHook(teamId, OrchestrationHookEvents.TaskCompleted, {
                 team_id: teamId,
                 task_id: task.id,
@@ -428,6 +517,19 @@ export class OrchestrationEngine {
                 correlation_task_id: task.id,
               });
             } else if (terminal === 'timed_out') {
+              if (
+                this.tryScheduleRetryAfterFailure({
+                  teamId,
+                  taskId: task.id,
+                  agentId: agent.id,
+                  terminal: 'timed_out',
+                  runId: run_id,
+                  executionStarted,
+                })
+              ) {
+                this.notify();
+                return;
+              }
               updateAgent(agent.id, { status: 'idle', current_task_id: undefined });
               updateTask(task.id, { status: 'timed_out', assignee_agent_id: undefined });
               this.emitHook(teamId, OrchestrationHookEvents.TaskTimedOut, {
@@ -439,11 +541,7 @@ export class OrchestrationEngine {
                 adapter_kind: this.env.kind,
                 correlation_task_id: task.id,
               });
-            } else if (
-              terminal === 'process_error' ||
-              terminal === 'policy_rejected' ||
-              (error && terminal !== 'success')
-            ) {
+            } else if (terminal === 'policy_rejected') {
               updateAgent(agent.id, { status: 'idle', current_task_id: undefined });
               updateTask(task.id, { status: 'failed', assignee_agent_id: undefined });
               this.emitHook(teamId, OrchestrationHookEvents.TaskFailed, {
@@ -453,6 +551,34 @@ export class OrchestrationEngine {
                 run_id,
                 reason: detail ?? error?.message ?? terminal,
                 failure_class: terminal,
+                adapter_kind: this.env.kind,
+                correlation_task_id: task.id,
+              });
+            } else if (terminal === 'process_error' || (error && terminal !== 'success')) {
+              const failTerminal: WorkloadTerminalKind =
+                terminal === 'process_error' ? 'process_error' : terminalFromResult(error, result);
+              if (
+                this.tryScheduleRetryAfterFailure({
+                  teamId,
+                  taskId: task.id,
+                  agentId: agent.id,
+                  terminal: failTerminal,
+                  runId: run_id,
+                  executionStarted,
+                })
+              ) {
+                this.notify();
+                return;
+              }
+              updateAgent(agent.id, { status: 'idle', current_task_id: undefined });
+              updateTask(task.id, { status: 'failed', assignee_agent_id: undefined });
+              this.emitHook(teamId, OrchestrationHookEvents.TaskFailed, {
+                team_id: teamId,
+                task_id: task.id,
+                agent_id: agent.id,
+                run_id,
+                reason: detail ?? error?.message ?? failTerminal,
+                failure_class: failTerminal,
                 adapter_kind: this.env.kind,
                 correlation_task_id: task.id,
               });

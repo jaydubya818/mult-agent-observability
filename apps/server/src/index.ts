@@ -12,6 +12,14 @@ import {
 } from './theme';
 import { bootstrapOrchestration } from './orchestration/bootstrap';
 
+// Startup environment checks
+if (!process.env.ANTHROPIC_API_KEY) {
+  console.warn('[startup] Warning: ANTHROPIC_API_KEY is not set. Hook summarization and LLM features will be disabled.');
+}
+if (!process.env.OPENAI_API_KEY && !process.env.ANTHROPIC_API_KEY) {
+  console.warn('[startup] Warning: Neither OPENAI_API_KEY nor ANTHROPIC_API_KEY is set. Hook TTS and completion messages will fall back to static responses.');
+}
+
 // Initialize database
 initDatabase();
 

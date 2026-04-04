@@ -63,7 +63,7 @@ describe('Retention: admin audit log', () => {
     expect(s.admin_audit.removed_by_row_cap).toBe(0);
     expect(countAdminAuditRecords()).toBe(1);
     const rows = db.prepare(`SELECT id FROM orchestration_admin_audit_log`).all() as { id: string }[];
-    expect(rows[0].id).toBe('audit-fresh');
+    expect(rows[0]!.id).toBe('audit-fresh');
   });
 
   test('max_rows cap keeps newest rows after age prune (precedence: age then cap)', () => {
@@ -124,9 +124,9 @@ describe('Retention: task runs', () => {
 
   test('max_days deletes old terminal runs; preserves recent and running', () => {
     const team = createTeam({ name: 't' });
-    const tOld = createTask({ team_id: team.id, title: 'old', status: 'done' });
-    const tNew = createTask({ team_id: team.id, title: 'new', status: 'done' });
-    const tRun = createTask({ team_id: team.id, title: 'live', status: 'running' });
+    const tOld = createTask({ team_id: team.id, title: 'old', status: 'done' })!;
+    const tNew = createTask({ team_id: team.id, title: 'new', status: 'done' })!;
+    const tRun = createTask({ team_id: team.id, title: 'live', status: 'running' })!;
     const now = Date.now();
 
     startTaskRun({
@@ -179,13 +179,15 @@ describe('Retention: task runs', () => {
 
   test('max_rows removes oldest finished terminal runs', () => {
     const team = createTeam({ name: 't2' });
+    expect(team).toBeTruthy();
+    const teamId = team!.id;
     const base = Date.now() - 200 * DAY_MS;
     for (let i = 0; i < 5; i++) {
-      const t = createTask({ team_id: team.id, title: `x${i}`, status: 'done' });
+      const t = createTask({ team_id: teamId, title: `x${i}`, status: 'done' })!;
       startTaskRun({
         task_id: t.id,
         run_id: `run-${i}`,
-        team_id: team.id,
+        team_id: teamId,
         agent_id: 'a',
         environment_kind: 'local_process',
       });

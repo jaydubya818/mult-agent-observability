@@ -23,6 +23,7 @@ import {
   policyFromPersistedRecord,
   streamTailCharBudget,
 } from './environments/localProcessPolicy';
+import { getRetryMetaFromPayload } from './retryPolicy';
 
 export function initOrchestrationSchema(): void {
   db.exec(`
@@ -99,6 +100,7 @@ export function initOrchestrationSchema(): void {
       agent_id TEXT,
       environment_kind TEXT NOT NULL DEFAULT 'simulated',
       status TEXT NOT NULL DEFAULT 'pending',
+      attempt INTEGER NOT NULL DEFAULT 1,
       stdout_tail TEXT NOT NULL DEFAULT '',
       stderr_tail TEXT NOT NULL DEFAULT '',
       stdout_bytes INTEGER NOT NULL DEFAULT 0,
@@ -310,6 +312,9 @@ function migrateOrchestrationTaskRunsColumns(): void {
   if (!names.has('termination_reason')) {
     db.exec(`ALTER TABLE orchestration_task_runs ADD COLUMN termination_reason TEXT`);
   }
+  if (!names.has('attempt')) {
+    db.exec(`ALTER TABLE orchestration_task_runs ADD COLUMN attempt INTEGER`);
+  }
 }
 
 function streamTailLimitForTask(taskId: string): number {
@@ -366,15 +371,16 @@ export function recordPreStartRejectedRun(input: {
   const now = Date.now();
   db.prepare(
     `INSERT INTO orchestration_task_runs (
-       task_id, run_id, team_id, agent_id, environment_kind, status,
+       task_id, run_id, team_id, agent_id, environment_kind, status, attempt,
        stdout_tail, stderr_tail, stdout_bytes, stderr_bytes, exit_code, started_at, finished_at, error_message, termination_reason
-     ) VALUES (?, ?, ?, ?, ?, 'policy_rejected', '', '', 0, 0, NULL, ?, ?, ?, 'policy_rejected')
+     ) VALUES (?, ?, ?, ?, ?, 'policy_rejected', 0, '', '', 0, 0, NULL, ?, ?, ?, 'policy_rejected')
      ON CONFLICT(task_id) DO UPDATE SET
        run_id = excluded.run_id,
        team_id = excluded.team_id,
        agent_id = excluded.agent_id,
        environment_kind = excluded.environment_kind,
        status = 'policy_rejected',
+       attempt = 0,
        stdout_tail = '',
        stderr_tail = '',
        stdout_bytes = 0,
@@ -402,19 +408,23 @@ export function startTaskRun(input: {
   team_id: string;
   agent_id: string;
   environment_kind: string;
+  /** 1-based workload attempt (defaults to 1). */
+  attempt?: number;
 }): void {
   const now = Date.now();
+  const attempt = input.attempt != null && input.attempt > 0 ? input.attempt : 1;
   db.prepare(
     `INSERT INTO orchestration_task_runs (
-       task_id, run_id, team_id, agent_id, environment_kind, status,
+       task_id, run_id, team_id, agent_id, environment_kind, status, attempt,
        stdout_tail, stderr_tail, stdout_bytes, stderr_bytes, exit_code, started_at, finished_at, error_message, termination_reason
-     ) VALUES (?, ?, ?, ?, ?, 'running', '', '', 0, 0, NULL, ?, NULL, NULL, NULL)
+     ) VALUES (?, ?, ?, ?, ?, 'running', ?, '', '', 0, 0, NULL, ?, NULL, NULL, NULL)
      ON CONFLICT(task_id) DO UPDATE SET
        run_id = excluded.run_id,
        team_id = excluded.team_id,
        agent_id = excluded.agent_id,
        environment_kind = excluded.environment_kind,
        status = 'running',
+       attempt = excluded.attempt,
        stdout_tail = '',
        stderr_tail = '',
        stdout_bytes = 0,
@@ -424,7 +434,7 @@ export function startTaskRun(input: {
        finished_at = NULL,
        error_message = NULL,
        termination_reason = NULL`
-  ).run(input.task_id, input.run_id, input.team_id, input.agent_id, input.environment_kind, now);
+  ).run(input.task_id, input.run_id, input.team_id, input.agent_id, input.environment_kind, attempt, now);
 }
 
 export function appendTaskRunStream(taskId: string, stream: 'stdout' | 'stderr', chunk: string): void {
@@ -486,6 +496,7 @@ function rowToTaskRun(row: any): TaskRunRecord {
     agent_id: row.agent_id ?? undefined,
     environment_kind: row.environment_kind,
     status: row.status,
+    attempt: row.attempt != null && row.attempt !== '' ? Number(row.attempt) : 1,
     stdout_tail: row.stdout_tail ?? '',
     stderr_tail: row.stderr_tail ?? '',
     stdout_bytes: row.stdout_bytes ?? 0,
@@ -776,7 +787,19 @@ export function updateTask(
   return getTaskById(id);
 }
 
+function taskRetryView(payload: Record<string, unknown>): Task['retry'] {
+  const m = getRetryMetaFromPayload(payload);
+  if (!m) return undefined;
+  return {
+    attempt: m.attempt,
+    max_attempts: m.max_attempts,
+    next_retry_at: m.next_retry_at,
+    last_failure_class: m.last_failure_class,
+  };
+}
+
 function rowToTask(row: any): Task {
+  const payload = parseJson<Record<string, unknown>>(row.payload, {});
   return {
     id: row.id,
     team_id: row.team_id,
@@ -785,7 +808,8 @@ function rowToTask(row: any): Task {
     status: row.status as TaskStatus,
     priority: row.priority,
     assignee_agent_id: row.assignee_agent_id ?? undefined,
-    payload: parseJson(row.payload, {}),
+    payload,
+    retry: taskRetryView(payload),
     created_at: row.created_at,
     updated_at: row.updated_at,
   };

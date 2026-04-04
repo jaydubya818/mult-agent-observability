@@ -30,6 +30,12 @@ function parseIntEnv(key: string, fallback: number): number {
   return Number.isFinite(n) && n > 0 ? n : fallback;
 }
 
+function parseBoolEnv(key: string, fallback: boolean): boolean {
+  const v = process.env[key];
+  if (v === undefined || v === '') return fallback;
+  return v === '1' || v.toLowerCase() === 'true' || v.toLowerCase() === 'yes';
+}
+
 export type LocalProcessPolicy = {
   cmdAllowlist: string[] | null;
   cmdDenylist: Set<string>;
@@ -55,7 +61,7 @@ export function loadLocalProcessPolicyFromEnv(): LocalProcessPolicy {
     maxRuntimeMs: parseIntEnv('ORCH_LP_MAX_MS', 300_000),
     maxConcurrent: parseIntEnv('ORCH_LP_MAX_CONCURRENT', 4),
     cwdAllowlistRoots: cwdRoots,
-    allowUnspecifiedCwd: true,
+    allowUnspecifiedCwd: parseBoolEnv('ORCH_LP_ALLOW_UNSPECIFIED_CWD', true),
     envKeyAllowlist: envAllow.length ? envAllow.map((s) => s.toUpperCase()) : null,
     maxOutputBytesTotal: parseIntEnv('ORCH_LP_MAX_OUTPUT_BYTES', 256_000),
   };

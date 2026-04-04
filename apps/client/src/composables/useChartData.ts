@@ -1,4 +1,4 @@
-import { ref, computed } from 'vue';
+import { ref, computed, onUnmounted } from 'vue';
 import type { HookEvent, ChartDataPoint, TimeRange } from '../types';
 
 export function useChartData(agentIdFilter?: string) {
@@ -257,6 +257,9 @@ export function useChartData(agentIdFilter?: string) {
       processEventBuffer(); // Process any remaining events
     }
   };
+
+  // Auto-cleanup when the component using this composable unmounts
+  onUnmounted(cleanup);
 
   // Clear all data (for when user clicks clear button)
   const clearData = () => {

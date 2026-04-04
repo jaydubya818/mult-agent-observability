@@ -8,8 +8,8 @@ import os
 import time
 from pathlib import Path
 
-# Set to False to disable caching and always read from transcript
-ENABLE_CACHING = False
+# Set CLAUDE_HOOKS_ENABLE_CACHING=1 in your environment to enable transcript caching
+ENABLE_CACHING = os.environ.get("CLAUDE_HOOKS_ENABLE_CACHING", "").strip() in ("1", "true", "yes")
 
 
 def get_model_from_transcript(session_id: str, transcript_path: str, ttl: int = 60) -> str:

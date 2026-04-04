@@ -6,6 +6,7 @@
 import json
 import sys
 import re
+import shlex
 from pathlib import Path
 from utils.constants import ensure_session_log_dir
 
@@ -98,7 +99,28 @@ def is_dangerous_rm_command(command, allowed_dirs=None):
             is_potentially_dangerous = True
             break
 
-    # If not found in Pattern 1, check Pattern 2
+    # Pattern 1b: Token-based detection (catches separated flags like `rm -r -f`, `rm -v -r FILE -f`)
+    if not is_potentially_dangerous:
+        try:
+            tokens = shlex.split(command)
+            if tokens and tokens[0].split('/')[-1] in ('rm',):
+                rm_flags: set[str] = set()
+                for token in tokens[1:]:
+                    if token == '--':
+                        break  # end of options
+                    if token.startswith('--'):
+                        if token in ('--recursive', '-recursive'):
+                            rm_flags.add('r')
+                        elif token in ('--force', '-force'):
+                            rm_flags.add('f')
+                    elif token.startswith('-') and len(token) > 1:
+                        rm_flags.update(token[1:])  # expand combined flags e.g. -rv → {r, v}
+                if 'r' in rm_flags and 'f' in rm_flags:
+                    is_potentially_dangerous = True
+        except ValueError:
+            pass  # shlex.split fails on some shell syntax; fall through to regex patterns
+
+    # If not found in Pattern 1/1b, check Pattern 2
     if not is_potentially_dangerous:
         # Pattern 2: Check for rm with recursive flag targeting dangerous paths
         dangerous_paths = [
