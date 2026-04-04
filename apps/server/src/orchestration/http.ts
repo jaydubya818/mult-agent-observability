@@ -32,7 +32,41 @@ import {
   updateTeam,
 } from './repository';
 import { runOrchestrationRetentionPrune } from './retention';
-import type { MessageDirection, MessageKind, TaskStatus } from './types';
+import type { MessageDirection, MessageKind, RetryJitterMode, TaskStatus } from './types';
+
+function parseRetryConfigFields(body: Record<string, unknown>): Partial<{
+  retry_max_attempts: number | null;
+  retry_backoff_ms: number | null;
+  retry_max_backoff_ms: number | null;
+  retry_jitter: RetryJitterMode | null;
+}> {
+  const out: Partial<{
+    retry_max_attempts: number | null;
+    retry_backoff_ms: number | null;
+    retry_max_backoff_ms: number | null;
+    retry_jitter: RetryJitterMode | null;
+  }> = {};
+  const numericKeys = ['retry_max_attempts', 'retry_backoff_ms', 'retry_max_backoff_ms'] as const;
+  for (const k of numericKeys) {
+    if (!Object.prototype.hasOwnProperty.call(body, k)) continue;
+    const v = body[k];
+    if (v === null) {
+      out[k] = null;
+      continue;
+    }
+    if (typeof v !== 'number' || !Number.isFinite(v) || v < 0) {
+      throw new Error(`invalid ${k}`);
+    }
+    out[k] = Math.floor(v);
+  }
+  if (Object.prototype.hasOwnProperty.call(body, 'retry_jitter')) {
+    const v = body.retry_jitter;
+    if (v === null) out.retry_jitter = null;
+    else if (v === 'off' || v === 'uniform') out.retry_jitter = v;
+    else throw new Error('invalid retry_jitter');
+  }
+  return out;
+}
 
 const JSON_HDR = { 'Content-Type': 'application/json' };
 
@@ -110,11 +144,16 @@ export async function handleOrchestrationRequest(
       }
       let team;
       try {
+        const retry =
+          typeof body === 'object' && body
+            ? parseRetryConfigFields(body as Record<string, unknown>)
+            : {};
         team = createTeam({
           name: body.name,
           description: body.description,
           execution_policy_id:
             typeof body.execution_policy_id === 'string' ? body.execution_policy_id : undefined,
+          ...retry,
         });
       } catch {
         return json({ error: 'invalid team payload' }, 400, h);
@@ -199,6 +238,17 @@ export async function handleOrchestrationRequest(
         });
         return json({ error: 'name is required' }, 400, h);
       }
+      let retryFields: ReturnType<typeof parseRetryConfigFields> = {};
+      try {
+        retryFields = parseRetryConfigFields(body as Record<string, unknown>);
+      } catch {
+        recordAdminAuditInvalid(req, url, {
+          action: 'policy_create',
+          target_entity_type: 'policy',
+          metadata: { error: 'invalid_retry_fields' },
+        });
+        return json({ error: 'invalid retry fields' }, 400, h);
+      }
       const pol = createExecutionPolicy({
         name: body.name,
         adapter_kind: typeof body.adapter_kind === 'string' ? body.adapter_kind : undefined,
@@ -214,6 +264,7 @@ export async function handleOrchestrationRequest(
               ? body.env_allowlist
               : undefined,
         max_output_bytes: typeof body.max_output_bytes === 'number' ? body.max_output_bytes : undefined,
+        ...retryFields,
       });
       recordAdminAuditSuccess(req, url, {
         action: 'policy_create',
@@ -241,6 +292,18 @@ export async function handleOrchestrationRequest(
       });
       if (denied) return denied;
       const body = await safeJson(req);
+      let retryPatch: ReturnType<typeof parseRetryConfigFields> = {};
+      try {
+        retryPatch = parseRetryConfigFields(body as Record<string, unknown>);
+      } catch {
+        recordAdminAuditInvalid(req, url, {
+          action: 'policy_update',
+          target_entity_type: 'policy',
+          target_entity_id: policyId,
+          metadata: { error: 'invalid_retry_fields' },
+        });
+        return json({ error: 'invalid retry fields' }, 400, h);
+      }
       const updated = updateExecutionPolicy(policyId, {
         name: typeof body.name === 'string' ? body.name : undefined,
         adapter_kind: typeof body.adapter_kind === 'string' ? body.adapter_kind : undefined,
@@ -261,6 +324,7 @@ export async function handleOrchestrationRequest(
               ? body.env_allowlist
               : undefined,
         max_output_bytes: typeof body.max_output_bytes === 'number' ? body.max_output_bytes : undefined,
+        ...retryPatch,
       });
       if (!updated) {
         recordAdminAuditInvalid(req, url, {
@@ -314,6 +378,10 @@ export async function handleOrchestrationRequest(
         name?: string;
         description?: string | null;
         execution_policy_id?: string | null;
+        retry_max_attempts?: number | null;
+        retry_backoff_ms?: number | null;
+        retry_max_backoff_ms?: number | null;
+        retry_jitter?: RetryJitterMode | null;
       } = {};
       if (typeof body.name === 'string') patch.name = body.name;
       if (body.description === null || typeof body.description === 'string') patch.description = body.description;
@@ -330,6 +398,11 @@ export async function handleOrchestrationRequest(
           return json({ error: 'execution_policy_id not found' }, 400, h);
         }
         patch.execution_policy_id = body.execution_policy_id;
+      }
+      try {
+        Object.assign(patch, parseRetryConfigFields(body as Record<string, unknown>));
+      } catch {
+        return json({ error: 'invalid retry fields' }, 400, h);
       }
       const updated = updateTeam(teamId, patch);
       if (!updated) {

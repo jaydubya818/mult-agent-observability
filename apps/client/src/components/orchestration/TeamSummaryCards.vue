@@ -26,6 +26,11 @@ const cards = computed(() => {
   const tc = s.task_counts;
   return [
     { key: 'agents', label: 'Agents', value: s.agent_count },
+    {
+      key: 'retry_max',
+      label: 'Retry attempts (cap)',
+      value: s.resolved_retry.max_attempts,
+    },
     { key: 'backlog', label: 'Backlog', value: tc.backlog },
     { key: 'queued', label: 'Queued', value: tc.queued },
     { key: 'running', label: 'Running', value: tc.running },

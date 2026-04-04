@@ -48,7 +48,14 @@
               Assignee: {{ agentName(task.assignee_agent_id) }}
             </p>
             <p v-if="task.retry" class="text-xs text-[var(--theme-text-secondary)] mt-2">
-              Retry: attempt {{ task.retry.attempt }} / {{ task.retry.max_attempts }}
+              Retry: attempt {{ task.retry.attempt }} / {{ task.retry.effective.max_attempts }}
+              <span class="text-[var(--theme-text-tertiary)]">
+                · backoff {{ task.retry.effective.backoff_ms }}ms
+                <template v-if="task.retry.effective.max_backoff_ms != null">
+                  · cap {{ task.retry.effective.max_backoff_ms }}ms
+                </template>
+                · jitter {{ task.retry.effective.jitter }}
+              </span>
               <span v-if="task.retry.next_retry_at && task.retry.next_retry_at > Date.now()" class="text-[var(--theme-text-tertiary)]">
                 · next at {{ formatTs(task.retry.next_retry_at) }}
               </span>

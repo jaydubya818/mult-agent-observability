@@ -279,6 +279,14 @@ const server = Bun.serve({
       }
     }
     
+    // GET /api/themes/stats - Get theme statistics (must be before /api/themes/:id)
+    if (url.pathname === '/api/themes/stats' && req.method === 'GET') {
+      const result = await getThemeStats();
+      return new Response(JSON.stringify(result), {
+        headers: { ...headers, 'Content-Type': 'application/json' }
+      });
+    }
+
     // GET /api/themes - Search themes
     if (url.pathname === '/api/themes' && req.method === 'GET') {
       const query = {
@@ -426,14 +434,6 @@ const server = Bun.serve({
           headers: { ...headers, 'Content-Type': 'application/json' }
         });
       }
-    }
-    
-    // GET /api/themes/stats - Get theme statistics
-    if (url.pathname === '/api/themes/stats' && req.method === 'GET') {
-      const result = await getThemeStats();
-      return new Response(JSON.stringify(result), {
-        headers: { ...headers, 'Content-Type': 'application/json' }
-      });
     }
     
     // WebSocket upgrade

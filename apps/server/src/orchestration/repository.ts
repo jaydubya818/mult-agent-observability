@@ -23,7 +23,12 @@ import {
   policyFromPersistedRecord,
   streamTailCharBudget,
 } from './environments/localProcessPolicy';
-import { getRetryMetaFromPayload } from './retryPolicy';
+import {
+  ORCH_RETRY_PAYLOAD_KEY,
+  resolveTaskRetryConfig,
+  stripLegacyRetryFromPayload,
+} from './retryPolicy';
+import type { ResolvedTaskRetryConfig, RetryConfigLayer, RetryJitterMode } from './types';
 
 export function initOrchestrationSchema(): void {
   db.exec(`
@@ -57,6 +62,9 @@ export function initOrchestrationSchema(): void {
       priority INTEGER NOT NULL DEFAULT 0,
       assignee_agent_id TEXT,
       payload TEXT NOT NULL DEFAULT '{}',
+      retry_attempt INTEGER NOT NULL DEFAULT 0,
+      retry_next_at INTEGER,
+      retry_last_failure_class TEXT,
       created_at INTEGER NOT NULL,
       updated_at INTEGER NOT NULL,
       FOREIGN KEY (team_id) REFERENCES orchestration_teams(id) ON DELETE CASCADE
@@ -161,6 +169,93 @@ export function initOrchestrationSchema(): void {
   `);
   migrateOrchestrationTaskRunsColumns();
   migrateOrchestrationTeamsPolicyColumn();
+  migrateOrchestrationRetryColumns();
+  migrateOrchestrationLegacyPayloadRetry();
+}
+
+const NULL_RETRY_LAYER: RetryConfigLayer = {
+  retry_max_attempts: null,
+  retry_backoff_ms: null,
+  retry_max_backoff_ms: null,
+  retry_jitter: null,
+};
+
+function normalizeJitterCell(raw: unknown): RetryJitterMode | null {
+  if (raw === 'uniform' || raw === 'off') return raw;
+  return null;
+}
+
+function retryLayerFromTeamRow(row: any): RetryConfigLayer {
+  return {
+    retry_max_attempts: row.retry_max_attempts != null ? Number(row.retry_max_attempts) : null,
+    retry_backoff_ms: row.retry_backoff_ms != null ? Number(row.retry_backoff_ms) : null,
+    retry_max_backoff_ms: row.retry_max_backoff_ms != null ? Number(row.retry_max_backoff_ms) : null,
+    retry_jitter: normalizeJitterCell(row.retry_jitter),
+  };
+}
+
+function retryLayerFromPolicyRow(row: any): RetryConfigLayer {
+  return retryLayerFromTeamRow(row);
+}
+
+/** Resolve retry for a team id without constructing full `Team` (avoids recursion). */
+export function resolveRetryConfigForTeamId(teamId: string): ResolvedTaskRetryConfig {
+  const row = db.prepare(`SELECT * FROM orchestration_teams WHERE id = ?`).get(teamId) as any;
+  if (!row) {
+    return resolveTaskRetryConfig({ team: NULL_RETRY_LAYER, policy: null });
+  }
+  const teamLayer = retryLayerFromTeamRow(row);
+  let policyLayer: RetryConfigLayer | null = null;
+  if (row.execution_policy_id) {
+    const prow = db.prepare(`SELECT * FROM orchestration_execution_policies WHERE id = ?`).get(row.execution_policy_id) as any;
+    if (prow) policyLayer = retryLayerFromPolicyRow(prow);
+  }
+  return resolveTaskRetryConfig({ team: teamLayer, policy: policyLayer });
+}
+
+function migrateOrchestrationRetryColumns(): void {
+  const teamCols = db.prepare(`PRAGMA table_info(orchestration_teams)`).all() as { name: string }[];
+  const teamNames = new Set(teamCols.map((c) => c.name));
+  for (const col of ['retry_max_attempts', 'retry_backoff_ms', 'retry_max_backoff_ms', 'retry_jitter'] as const) {
+    if (!teamNames.has(col)) {
+      db.exec(`ALTER TABLE orchestration_teams ADD COLUMN ${col} ${col === 'retry_jitter' ? 'TEXT' : 'INTEGER'}`);
+    }
+  }
+  const policyCols = db.prepare(`PRAGMA table_info(orchestration_execution_policies)`).all() as { name: string }[];
+  const policyNames = new Set(policyCols.map((c) => c.name));
+  for (const col of ['retry_max_attempts', 'retry_backoff_ms', 'retry_max_backoff_ms', 'retry_jitter'] as const) {
+    if (!policyNames.has(col)) {
+      db.exec(`ALTER TABLE orchestration_execution_policies ADD COLUMN ${col} ${col === 'retry_jitter' ? 'TEXT' : 'INTEGER'}`);
+    }
+  }
+  const taskCols = db.prepare(`PRAGMA table_info(orchestration_tasks)`).all() as { name: string }[];
+  const taskNames = new Set(taskCols.map((c) => c.name));
+  if (!taskNames.has('retry_attempt')) {
+    db.exec(`ALTER TABLE orchestration_tasks ADD COLUMN retry_attempt INTEGER NOT NULL DEFAULT 0`);
+  }
+  if (!taskNames.has('retry_next_at')) {
+    db.exec(`ALTER TABLE orchestration_tasks ADD COLUMN retry_next_at INTEGER`);
+  }
+  if (!taskNames.has('retry_last_failure_class')) {
+    db.exec(`ALTER TABLE orchestration_tasks ADD COLUMN retry_last_failure_class TEXT`);
+  }
+}
+
+function migrateOrchestrationLegacyPayloadRetry(): void {
+  const rows = db.prepare(`SELECT id, payload FROM orchestration_tasks`).all() as { id: string; payload: string }[];
+  for (const r of rows) {
+    const payload = parseJson<Record<string, unknown>>(r.payload, {});
+    const legacy = payload[ORCH_RETRY_PAYLOAD_KEY];
+    if (!legacy || typeof legacy !== 'object' || Array.isArray(legacy)) continue;
+    const L = legacy as Record<string, unknown>;
+    const attempt = typeof L.attempt === 'number' ? L.attempt : 0;
+    const nextAt = typeof L.next_retry_at === 'number' ? L.next_retry_at : null;
+    const lfc = typeof L.last_failure_class === 'string' ? L.last_failure_class : null;
+    delete payload[ORCH_RETRY_PAYLOAD_KEY];
+    db.prepare(
+      `UPDATE orchestration_tasks SET retry_attempt = ?, retry_next_at = ?, retry_last_failure_class = ?, payload = ?, updated_at = ? WHERE id = ?`
+    ).run(attempt, nextAt, lfc, JSON.stringify(payload), Date.now(), r.id);
+  }
 }
 
 function migrateOrchestrationTeamsPolicyColumn(): void {
@@ -171,6 +266,7 @@ function migrateOrchestrationTeamsPolicyColumn(): void {
 }
 
 function rowToExecutionPolicy(row: any): ExecutionPolicy {
+  const retry = retryLayerFromPolicyRow(row);
   return {
     id: row.id,
     name: row.name,
@@ -184,6 +280,7 @@ function rowToExecutionPolicy(row: any): ExecutionPolicy {
     max_output_bytes: row.max_output_bytes,
     created_at: row.created_at,
     updated_at: row.updated_at,
+    ...retry,
   };
 }
 
@@ -209,6 +306,10 @@ export function createExecutionPolicy(input: {
   cwd_allowlist?: string[];
   env_allowlist?: string[] | null;
   max_output_bytes?: number;
+  retry_max_attempts?: number | null;
+  retry_backoff_ms?: number | null;
+  retry_max_backoff_ms?: number | null;
+  retry_jitter?: RetryJitterMode | null;
 }): ExecutionPolicy {
   const id = crypto.randomUUID();
   const now = Date.now();
@@ -221,11 +322,17 @@ export function createExecutionPolicy(input: {
     env_allowlist: input.env_allowlist ?? null,
     max_output_bytes: input.max_output_bytes ?? 256_000,
   };
+  const rMax = input.retry_max_attempts === undefined ? null : input.retry_max_attempts;
+  const rBo = input.retry_backoff_ms === undefined ? null : input.retry_backoff_ms;
+  const rCap = input.retry_max_backoff_ms === undefined ? null : input.retry_max_backoff_ms;
+  const rJit = input.retry_jitter === undefined ? null : input.retry_jitter;
   db.prepare(
     `INSERT INTO orchestration_execution_policies (
        id, name, adapter_kind, cmd_allowlist, cmd_denylist, max_ms, max_concurrent,
-       cwd_allowlist, env_allowlist, max_output_bytes, created_at, updated_at
-     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+       cwd_allowlist, env_allowlist, max_output_bytes,
+       retry_max_attempts, retry_backoff_ms, retry_max_backoff_ms, retry_jitter,
+       created_at, updated_at
+     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
   ).run(
     id,
     input.name,
@@ -237,6 +344,10 @@ export function createExecutionPolicy(input: {
     JSON.stringify(row.cwd_allowlist),
     row.env_allowlist === null ? null : JSON.stringify(row.env_allowlist),
     row.max_output_bytes,
+    rMax,
+    rBo,
+    rCap,
+    rJit,
     now,
     now
   );
@@ -255,6 +366,10 @@ export function updateExecutionPolicy(
     cwd_allowlist: string[];
     env_allowlist: string[] | null;
     max_output_bytes: number;
+    retry_max_attempts: number | null;
+    retry_backoff_ms: number | null;
+    retry_max_backoff_ms: number | null;
+    retry_jitter: RetryJitterMode | null;
   }>
 ): ExecutionPolicy | null {
   const cur = getExecutionPolicyById(id);
@@ -266,12 +381,20 @@ export function updateExecutionPolicy(
     cmd_denylist: patch.cmd_denylist !== undefined ? patch.cmd_denylist : cur.cmd_denylist,
     cwd_allowlist: patch.cwd_allowlist !== undefined ? patch.cwd_allowlist : cur.cwd_allowlist,
     env_allowlist: patch.env_allowlist !== undefined ? patch.env_allowlist : cur.env_allowlist,
+    retry_max_attempts:
+      patch.retry_max_attempts !== undefined ? patch.retry_max_attempts : cur.retry_max_attempts,
+    retry_backoff_ms: patch.retry_backoff_ms !== undefined ? patch.retry_backoff_ms : cur.retry_backoff_ms,
+    retry_max_backoff_ms:
+      patch.retry_max_backoff_ms !== undefined ? patch.retry_max_backoff_ms : cur.retry_max_backoff_ms,
+    retry_jitter: patch.retry_jitter !== undefined ? patch.retry_jitter : cur.retry_jitter,
   };
   const now = Date.now();
   db.prepare(
     `UPDATE orchestration_execution_policies SET
        name = ?, adapter_kind = ?, cmd_allowlist = ?, cmd_denylist = ?, max_ms = ?, max_concurrent = ?,
-       cwd_allowlist = ?, env_allowlist = ?, max_output_bytes = ?, updated_at = ?
+       cwd_allowlist = ?, env_allowlist = ?, max_output_bytes = ?,
+       retry_max_attempts = ?, retry_backoff_ms = ?, retry_max_backoff_ms = ?, retry_jitter = ?,
+       updated_at = ?
      WHERE id = ?`
   ).run(
     next.name,
@@ -283,6 +406,10 @@ export function updateExecutionPolicy(
     JSON.stringify(next.cwd_allowlist),
     next.env_allowlist === null ? null : JSON.stringify(next.env_allowlist),
     next.max_output_bytes,
+    next.retry_max_attempts,
+    next.retry_backoff_ms,
+    next.retry_max_backoff_ms,
+    next.retry_jitter,
     now,
     id
   );
@@ -543,6 +670,10 @@ export function createTeam(input: {
   name: string;
   description?: string;
   execution_policy_id?: string | null;
+  retry_max_attempts?: number | null;
+  retry_backoff_ms?: number | null;
+  retry_max_backoff_ms?: number | null;
+  retry_jitter?: RetryJitterMode | null;
 }): Team {
   const id = crypto.randomUUID();
   const now = Date.now();
@@ -550,10 +681,17 @@ export function createTeam(input: {
   if (pol !== null && !getExecutionPolicyById(pol)) {
     throw new Error('invalid execution_policy_id');
   }
+  const rMax = input.retry_max_attempts === undefined ? null : input.retry_max_attempts;
+  const rBo = input.retry_backoff_ms === undefined ? null : input.retry_backoff_ms;
+  const rCap = input.retry_max_backoff_ms === undefined ? null : input.retry_max_backoff_ms;
+  const rJit = input.retry_jitter === undefined ? null : input.retry_jitter;
   db.prepare(
-    `INSERT INTO orchestration_teams (id, name, description, execution_status, execution_policy_id, created_at, updated_at)
-     VALUES (?, ?, ?, 'stopped', ?, ?, ?)`
-  ).run(id, input.name, input.description ?? null, pol, now, now);
+    `INSERT INTO orchestration_teams (
+       id, name, description, execution_status, execution_policy_id,
+       retry_max_attempts, retry_backoff_ms, retry_max_backoff_ms, retry_jitter,
+       created_at, updated_at
+     ) VALUES (?, ?, ?, 'stopped', ?, ?, ?, ?, ?, ?, ?)`
+  ).run(id, input.name, input.description ?? null, pol, rMax, rBo, rCap, rJit, now, now);
   return getTeamById(id)!;
 }
 
@@ -563,6 +701,10 @@ export function updateTeam(
     name?: string;
     description?: string | null;
     execution_policy_id?: string | null;
+    retry_max_attempts?: number | null;
+    retry_backoff_ms?: number | null;
+    retry_max_backoff_ms?: number | null;
+    retry_jitter?: RetryJitterMode | null;
   }
 ): Team | null {
   const cur = getTeamById(id);
@@ -574,10 +716,29 @@ export function updateTeam(
   const description = patch.description !== undefined ? patch.description : cur.description ?? null;
   const execution_policy_id =
     patch.execution_policy_id !== undefined ? patch.execution_policy_id : cur.execution_policy_id ?? null;
+  const retry_max_attempts =
+    patch.retry_max_attempts !== undefined ? patch.retry_max_attempts : cur.retry_max_attempts;
+  const retry_backoff_ms =
+    patch.retry_backoff_ms !== undefined ? patch.retry_backoff_ms : cur.retry_backoff_ms;
+  const retry_max_backoff_ms =
+    patch.retry_max_backoff_ms !== undefined ? patch.retry_max_backoff_ms : cur.retry_max_backoff_ms;
+  const retry_jitter = patch.retry_jitter !== undefined ? patch.retry_jitter : cur.retry_jitter;
   const now = Date.now();
   db.prepare(
-    `UPDATE orchestration_teams SET name = ?, description = ?, execution_policy_id = ?, updated_at = ? WHERE id = ?`
-  ).run(name, description, execution_policy_id, now, id);
+    `UPDATE orchestration_teams SET name = ?, description = ?, execution_policy_id = ?,
+       retry_max_attempts = ?, retry_backoff_ms = ?, retry_max_backoff_ms = ?, retry_jitter = ?,
+       updated_at = ? WHERE id = ?`
+  ).run(
+    name,
+    description,
+    execution_policy_id,
+    retry_max_attempts,
+    retry_backoff_ms,
+    retry_max_backoff_ms,
+    retry_jitter,
+    now,
+    id
+  );
   return getTeamById(id);
 }
 
@@ -606,6 +767,7 @@ export function setTeamExecutionStatus(id: string, status: TeamExecutionStatus):
 }
 
 function rowToTeam(row: any): Team {
+  const retry = retryLayerFromTeamRow(row);
   return {
     id: row.id,
     name: row.name,
@@ -614,6 +776,8 @@ function rowToTeam(row: any): Team {
     execution_policy_id: row.execution_policy_id ?? null,
     created_at: row.created_at,
     updated_at: row.updated_at,
+    ...retry,
+    resolved_retry: resolveRetryConfigForTeamId(row.id),
   };
 }
 
@@ -700,9 +864,12 @@ export function createTask(input: {
   const id = crypto.randomUUID();
   const now = Date.now();
   const status = input.status ?? 'backlog';
+  const payload = stripLegacyRetryFromPayload({ ...(input.payload ?? {}) });
   db.prepare(
-    `INSERT INTO orchestration_tasks (id, team_id, title, description, status, priority, assignee_agent_id, payload, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, NULL, ?, ?, ?)`
+    `INSERT INTO orchestration_tasks (
+       id, team_id, title, description, status, priority, assignee_agent_id, payload,
+       retry_attempt, retry_next_at, retry_last_failure_class, created_at, updated_at
+     ) VALUES (?, ?, ?, ?, ?, ?, NULL, ?, 0, NULL, NULL, ?, ?)`
   ).run(
     id,
     input.team_id,
@@ -710,7 +877,7 @@ export function createTask(input: {
     input.description ?? null,
     status,
     input.priority ?? 0,
-    JSON.stringify(input.payload ?? {}),
+    JSON.stringify(payload),
     now,
     now
   );
@@ -746,7 +913,20 @@ export function getTaskById(id: string): Task | null {
 
 export function updateTask(
   id: string,
-  patch: Partial<Pick<Task, 'status' | 'priority' | 'assignee_agent_id' | 'title' | 'description' | 'payload'>> & {
+  patch: Partial<
+    Pick<
+      Task,
+      | 'status'
+      | 'priority'
+      | 'assignee_agent_id'
+      | 'title'
+      | 'description'
+      | 'payload'
+      | 'retry_attempt'
+      | 'retry_next_at'
+      | 'retry_last_failure_class'
+    >
+  > & {
     assignee_agent_id?: string | null;
   }
 ): Task | null {
@@ -755,13 +935,23 @@ export function updateTask(
   const now = Date.now();
   const nextAssignee =
     'assignee_agent_id' in patch ? (patch.assignee_agent_id === null ? undefined : patch.assignee_agent_id) : existing.assignee_agent_id;
+  const mergedPayload =
+    patch.payload !== undefined
+      ? stripLegacyRetryFromPayload({ ...existing.payload, ...patch.payload })
+      : existing.payload;
   const next = {
     title: patch.title ?? existing.title,
     description: patch.description !== undefined ? patch.description : existing.description,
     status: patch.status ?? existing.status,
     priority: patch.priority ?? existing.priority,
     assignee_agent_id: nextAssignee,
-    payload: patch.payload !== undefined ? patch.payload : existing.payload,
+    payload: mergedPayload,
+    retry_attempt: patch.retry_attempt !== undefined ? patch.retry_attempt : existing.retry_attempt,
+    retry_next_at: patch.retry_next_at !== undefined ? patch.retry_next_at : existing.retry_next_at,
+    retry_last_failure_class:
+      patch.retry_last_failure_class !== undefined
+        ? patch.retry_last_failure_class
+        : existing.retry_last_failure_class,
   };
   if (next.status !== existing.status) {
     recordTaskTransition({
@@ -773,7 +963,8 @@ export function updateTask(
     });
   }
   db.prepare(
-    `UPDATE orchestration_tasks SET title = ?, description = ?, status = ?, priority = ?, assignee_agent_id = ?, payload = ?, updated_at = ? WHERE id = ?`
+    `UPDATE orchestration_tasks SET title = ?, description = ?, status = ?, priority = ?, assignee_agent_id = ?, payload = ?,
+       retry_attempt = ?, retry_next_at = ?, retry_last_failure_class = ?, updated_at = ? WHERE id = ?`
   ).run(
     next.title,
     next.description ?? null,
@@ -781,25 +972,21 @@ export function updateTask(
     next.priority,
     next.assignee_agent_id ?? null,
     JSON.stringify(next.payload),
+    next.retry_attempt,
+    next.retry_next_at,
+    next.retry_last_failure_class,
     now,
     id
   );
   return getTaskById(id);
 }
 
-function taskRetryView(payload: Record<string, unknown>): Task['retry'] {
-  const m = getRetryMetaFromPayload(payload);
-  if (!m) return undefined;
-  return {
-    attempt: m.attempt,
-    max_attempts: m.max_attempts,
-    next_retry_at: m.next_retry_at,
-    last_failure_class: m.last_failure_class,
-  };
-}
-
 function rowToTask(row: any): Task {
-  const payload = parseJson<Record<string, unknown>>(row.payload, {});
+  const payload = stripLegacyRetryFromPayload(parseJson<Record<string, unknown>>(row.payload, {}));
+  const ra = row.retry_attempt != null ? Number(row.retry_attempt) : 0;
+  const rn = row.retry_next_at != null ? Number(row.retry_next_at) : null;
+  const rl = row.retry_last_failure_class != null ? String(row.retry_last_failure_class) : null;
+  const effective = resolveRetryConfigForTeamId(row.team_id);
   return {
     id: row.id,
     team_id: row.team_id,
@@ -809,7 +996,15 @@ function rowToTask(row: any): Task {
     priority: row.priority,
     assignee_agent_id: row.assignee_agent_id ?? undefined,
     payload,
-    retry: taskRetryView(payload),
+    retry_attempt: ra,
+    retry_next_at: rn,
+    retry_last_failure_class: rl,
+    retry: {
+      attempt: ra,
+      next_retry_at: rn ?? undefined,
+      last_failure_class: rl ?? undefined,
+      effective,
+    },
     created_at: row.created_at,
     updated_at: row.updated_at,
   };
@@ -1182,6 +1377,12 @@ export function sweepRunningTasksForEngineStop(teamId: string): void {
     .prepare(`SELECT id FROM orchestration_tasks WHERE team_id = ? AND status = 'running'`)
     .all(teamId) as { id: string }[];
   for (const { id } of rows) {
-    updateTask(id, { status: 'cancelled', assignee_agent_id: undefined });
+    updateTask(id, {
+      status: 'cancelled',
+      assignee_agent_id: undefined,
+      retry_attempt: 0,
+      retry_next_at: null,
+      retry_last_failure_class: null,
+    });
   }
 }

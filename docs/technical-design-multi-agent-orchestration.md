@@ -253,14 +253,50 @@ Env-configured retention prevents audit and task-run tables from growing without
 
 ### 6.4 Task execution retries (transient failures)
 
-Env-only policy today; leaves room for **per-team overrides** later without changing the payload contract.
+Retry behavior is **configurable per team and per linked execution policy**, with **env defaults** and a **small code fallback**. Runtime bookkeeping is on the **task row** (not in user JSON), so routine payload edits do not wipe retry state.
+
+#### 6.4.1 Retry configuration model
+
+| Field (team / policy column or API) | Meaning |
+|------------------------------------|---------|
+| `retry_max_attempts` | Nullable **INTEGER**. When set on team or policy, caps total **started** execution attempts for a task (minimum effective value **1** after resolution). `NULL` = inherit next layer. |
+| `retry_backoff_ms` | Nullable **INTEGER**. Base milliseconds for exponential delay: `base * 2 ** (failedAttempt - 1)`. `NULL` = inherit. |
+| `retry_max_backoff_ms` | Nullable **INTEGER**. Optional **cap** on computed delay after the exponential step. `NULL` = uncapped (subject to env/default). |
+| `retry_jitter` | Nullable **TEXT**: `off` \| `uniform`. `uniform` applies a mild multiplicative jitter on positive delays. `NULL` = inherit. |
+
+**Environment (third tier after team + policy):**
 
 | Variable | Meaning |
 |----------|---------|
-| `ORCH_TASK_MAX_ATTEMPTS` | **Minimum 1.** Total execution attempts allowed per task dispatch cycle (default **1** = no retries; preserves pre-retry behavior). |
-| `ORCH_TASK_RETRY_BACKOFF_MS` | Base delay in milliseconds for **exponential** backoff before a failed task returns to `queued` (formula: `base * 2 ** (failedAttempt - 1)`). `0` = immediate re-queue (tests / aggressive retry). Default **1000**. |
+| `ORCH_TASK_MAX_ATTEMPTS` | Default tier for `max_attempts` when team and policy columns are `NULL` (default **1** = no retries). |
+| `ORCH_TASK_RETRY_BACKOFF_MS` | Default base backoff (default **1000**). |
+| `ORCH_TASK_RETRY_MAX_BACKOFF_MS` | Optional env cap (omit = inherit hardcoded “uncapped” for this tier). |
+| `ORCH_TASK_RETRY_JITTER` | `off` \| `uniform` for the env tier. |
 
-**Retryability matrix (workload terminal → auto-retry?):**
+**Hardcoded fallback (fourth tier):** `max_attempts = 1`, `backoff_ms = 1000`, no cap, jitter `off`.
+
+#### 6.4.2 Resolution order
+
+For **each field independently**: **team column** → **linked execution policy** (`orchestration_teams.execution_policy_id`) → **environment** → **hardcoded default**.  
+`NULL` on a team or policy column means “inherit missing fields from the next layer,” not “force empty.”
+
+API: `POST/PATCH` teams and `POST/PATCH` policies accept the same retry field names; `PATCH` may set a field to JSON **`null`** to clear the team/policy override for that field (inheritance resumes).
+
+#### 6.4.3 Persisted retry state (task row)
+
+| Column | Meaning |
+|--------|---------|
+| `retry_attempt` | Last **started** workload attempt (1-based) while the task is in a retry cycle; reset to **0** when the task reaches a terminal state that clears retries. |
+| `retry_next_at` | When set on a `queued` task, wall-clock **epoch ms** before dispatch; dispatch is skipped until `now >= retry_next_at`. |
+| `retry_last_failure_class` | Last transient terminal (`process_error` / `timed_out`) that triggered scheduling (informational / UI). |
+
+**API / snapshot:** `Task.retry` exposes `{ attempt, next_retry_at?, last_failure_class?, effective }` where **`effective`** is the **resolved** retry config for the task’s team (including **`resolution`** provenance per field).
+
+**Legacy:** `payload.__orch_retry` is **deprecated**. On migration, existing values are copied into the columns above and the key is **removed** from stored JSON. Reads strip any leftover key from in-memory payload.
+
+**`orchestration_task_runs.attempt`** stores the **1-based attempt** for the current/last run row (pre-start rejections use `attempt = 0`).
+
+#### 6.4.4 Retryability matrix (workload terminal → auto-retry?)
 
 | `WorkloadTerminalKind` | Retry? | Notes |
 |------------------------|--------|--------|
@@ -269,24 +305,22 @@ Env-only policy today; leaves room for **per-team overrides** later without chan
 | `policy_rejected` | **No** | Configuration / intent; fix policy or payload. |
 | `user_cancelled` | **No** | Explicit operator signal. |
 | `engine_stopped` | **No** | Team/engine stopped; re-run only after explicit start. |
-| `success` | — | Terminal success clears retry metadata from the task row. |
+| `success` | — | Terminal success clears retry columns and strips legacy payload retry key if present. |
 
-**State & data model:**
+#### 6.4.5 Dispatch / queue
 
-- Bookkeeping lives in `orchestration_tasks.payload` under reserved key **`__orch_retry`**: `attempt` (1-based, last **started** run), `max_attempts`, optional `next_retry_at` (epoch ms), optional `last_failure_class`.
-- Snapshot **`Task.retry`** mirrors `__orch_retry` for clients (same numbers as payload).
-- `orchestration_task_runs.attempt` stores the **1-based attempt** for the current/last run row (pre-start rejections use `attempt = 0`).
+Tasks in `queued` with `next_retry_at > now()` are **not** assigned to agents until the wall clock passes (simple contention-friendly “delay queue” without a separate scheduler).
 
-**Dispatch / queue:** Tasks in `queued` with `next_retry_at > now()` are **not** assigned to agents until the wall clock passes (simple contention-friendly “delay queue” without a separate scheduler).
+#### 6.4.6 Observability (hooks + metrics)
 
-**Observability (hook event stream + metrics):**
-
-- **`OrchestrationTaskRetryScheduled`** — `attempt`, `max_attempts`, `next_retry_at`, `backoff_ms`, `failure_class`, `task_id`, `run_id`, …
-- **`OrchestrationTaskRetryExhausted`** — emitted only when **`ORCH_TASK_MAX_ATTEMPTS` > 1** and the final eligible failure occurs (`attempt` reaches cap); otherwise the task simply fails without this extra event (avoids noise for default single-attempt mode).
+- **`OrchestrationTaskRetryScheduled`** — includes `attempt`, `max_attempts`, `next_retry_at`, `backoff_ms`, `failure_class`, **`retry_config`** (resolved snapshot), `task_id`, `run_id`, …
+- **`OrchestrationTaskRetryExhausted`** — emitted only when configured **`max_attempts` > 1** and the final eligible failure occurs; includes **`retry_config`**.
 - Existing per-attempt events still fire (`ExecutionFailed`, `ExecutionTimedOut`, etc.).
 - Metrics: `tasks_retry_scheduled`, `tasks_retry_exhausted` (counts).
 
-**Limitations:** No jitter; no per-task overrides from API yet; replacing `payload` via HTTP without preserving `__orch_retry` can drop retry state; not a workflow engine—no DAG or step-level retries.
+#### 6.4.7 Limitations
+
+Not a workflow engine: **no DAG**, no step-level retries, no per-**task** API override of retry caps (only team/policy/env/default). Changing team/policy/env does not rewrite in-flight `retry_next_at` for already-queued tasks. Jitter is **uniform multiplicative** only (`uniform` mode), not a richer distribution. Very large `retry_next_at` values rely on wall-clock comparison at dispatch time—no separate scheduler process.
 
 ---
 

@@ -16,8 +16,36 @@ export type MessageDirection = 'orchestrator_to_agent' | 'agent_to_orchestrator'
 
 export type MessageKind = 'directive' | 'report' | 'system';
 
+/** Retry backoff jitter mode; `uniform` scales delay by U(0.85, 1.15). */
+export type RetryJitterMode = 'off' | 'uniform';
+
+/** Nullable DB columns: `null` = inherit next layer (team → policy → env → default). */
+export type RetryConfigLayer = {
+  retry_max_attempts: number | null;
+  retry_backoff_ms: number | null;
+  retry_max_backoff_ms: number | null;
+  retry_jitter: RetryJitterMode | null;
+};
+
+export type RetryResolutionSource = 'team' | 'policy' | 'env' | 'default';
+
+/** Effective retry config with per-field resolution trail. */
+export type ResolvedTaskRetryConfig = {
+  max_attempts: number;
+  backoff_ms: number;
+  /** Upper bound on computed delay after exponential step; `null` = uncapped. */
+  max_backoff_ms: number | null;
+  jitter: RetryJitterMode;
+  resolution: {
+    max_attempts: RetryResolutionSource;
+    backoff_ms: RetryResolutionSource;
+    max_backoff_ms: RetryResolutionSource;
+    jitter: RetryResolutionSource;
+  };
+};
+
 /** Persisted execution guardrails for an adapter (e.g. `local_process`). */
-export interface ExecutionPolicy {
+export interface ExecutionPolicy extends RetryConfigLayer {
   id: string;
   name: string;
   adapter_kind: string;
@@ -46,7 +74,7 @@ export type EffectiveLocalProcessPolicy = {
   max_output_bytes: number;
 };
 
-export interface Team {
+export interface Team extends RetryConfigLayer {
   id: string;
   name: string;
   description?: string;
@@ -55,6 +83,8 @@ export interface Team {
   execution_policy_id?: string | null;
   created_at: number;
   updated_at: number;
+  /** Resolved retry (team → linked execution policy → env → code default); for operators. */
+  resolved_retry: ResolvedTaskRetryConfig;
 }
 
 export interface Agent {
@@ -70,12 +100,12 @@ export interface Agent {
   updated_at: number;
 }
 
-/** Derived from `payload.__orch_retry` for UI and API clarity (same source of truth in DB). */
+/** Retry bookkeeping persisted on the task row (engine-owned; not part of user payload). */
 export interface TaskRetryState {
   attempt: number;
-  max_attempts: number;
   next_retry_at?: number;
   last_failure_class?: string;
+  effective: ResolvedTaskRetryConfig;
 }
 
 export interface Task {
@@ -87,8 +117,13 @@ export interface Task {
   priority: number;
   assignee_agent_id?: string;
   payload: Record<string, unknown>;
+  /** Last started execution attempt (1-based); 0 = no run started this cycle. */
+  retry_attempt: number;
+  retry_next_at: number | null;
+  retry_last_failure_class: string | null;
   created_at: number;
   updated_at: number;
+  /** Snapshot of persisted retry state + effective team/policy/env resolution. */
   retry?: TaskRetryState;
 }
 

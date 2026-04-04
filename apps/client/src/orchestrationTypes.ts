@@ -16,6 +16,24 @@ export type MessageDirection = 'orchestrator_to_agent' | 'agent_to_orchestrator'
 
 export type MessageKind = 'directive' | 'report' | 'system';
 
+export type RetryJitterMode = 'off' | 'uniform';
+
+export type RetryResolutionSource = 'team' | 'policy' | 'env' | 'default';
+
+/** Effective retry config with per-field resolution trail (server truth). */
+export interface ResolvedTaskRetryConfig {
+  max_attempts: number;
+  backoff_ms: number;
+  max_backoff_ms: number | null;
+  jitter: RetryJitterMode;
+  resolution: {
+    max_attempts: RetryResolutionSource;
+    backoff_ms: RetryResolutionSource;
+    max_backoff_ms: RetryResolutionSource;
+    jitter: RetryResolutionSource;
+  };
+}
+
 /** Persisted guardrails for local_process (server truth). */
 export interface ExecutionPolicy {
   id: string;
@@ -28,6 +46,10 @@ export interface ExecutionPolicy {
   cwd_allowlist: string[];
   env_allowlist: string[] | null;
   max_output_bytes: number;
+  retry_max_attempts: number | null;
+  retry_backoff_ms: number | null;
+  retry_max_backoff_ms: number | null;
+  retry_jitter: RetryJitterMode | null;
   created_at: number;
   updated_at: number;
 }
@@ -38,6 +60,12 @@ export interface OrchestrationTeam {
   description?: string;
   execution_status: TeamExecutionStatus;
   execution_policy_id?: string | null;
+  retry_max_attempts: number | null;
+  retry_backoff_ms: number | null;
+  retry_max_backoff_ms: number | null;
+  retry_jitter: RetryJitterMode | null;
+  /** Resolved team → policy → env → default (for operators). */
+  resolved_retry: ResolvedTaskRetryConfig;
   created_at: number;
   updated_at: number;
 }
@@ -57,9 +85,9 @@ export interface OrchestrationAgent {
 
 export interface TaskRetryState {
   attempt: number;
-  max_attempts: number;
   next_retry_at?: number;
   last_failure_class?: string;
+  effective: ResolvedTaskRetryConfig;
 }
 
 export interface OrchestrationTask {
@@ -71,6 +99,9 @@ export interface OrchestrationTask {
   priority: number;
   assignee_agent_id?: string;
   payload: Record<string, unknown>;
+  retry_attempt: number;
+  retry_next_at: number | null;
+  retry_last_failure_class: string | null;
   retry?: TaskRetryState;
   created_at: number;
   updated_at: number;
