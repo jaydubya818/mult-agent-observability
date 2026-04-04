@@ -466,6 +466,21 @@ When you have multiple agents running in parallel — each with their own contex
 
 This is what separates engineers from vibe coders: understanding what's happening underneath the hood so you can scale compute to scale impact with confidence.
 
+### In-repo orchestration service (API + UI)
+
+Beyond hook events, this codebase ships a **SQLite-backed orchestration layer** in the Bun server: teams, agents, tasks, execution policies, task runs, and an admin mutation audit log. The Vue client exposes an **Orchestration** view for boards, task detail, and live snapshot data.
+
+| Topic | Where to read |
+|--------|----------------|
+| HTTP routes, snapshot shape, admin token | [Technical design — multi-agent orchestration](docs/technical-design-multi-agent-orchestration.md) |
+| Retention / pruning (`ORCH_*` env vars) | Design doc §6.3 (startup prune + `POST /api/orchestration/admin/prune-history`) |
+| Product / delivery context | [PRD](docs/PRD-multi-agent-orchestration.md), [implementation plan](docs/implementation-plan-multi-agent-orchestration.md) |
+
+**Quick checks**
+
+- Server tests (orchestration): `cd apps/server && bun test src/orchestration`
+- Optional **retention** env: `ORCH_ADMIN_AUDIT_MAX_DAYS`, `ORCH_ADMIN_AUDIT_MAX_ROWS`, `ORCH_TASK_RUNS_MAX_DAYS`, `ORCH_TASK_RUNS_MAX_ROWS` (see design doc for precedence and what rows are eligible for pruning)
+
 ## 🛡️ Security Features
 
 - Blocks dangerous `rm -rf` commands via `deny_tool()` JSON pattern (allowed only in specific directories)
