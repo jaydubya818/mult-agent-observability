@@ -64,6 +64,11 @@ export function validateAndBuildRetryPatch(draft: RetryFormDraft): { ok: true; p
     return { ok: false, message: 'Max backoff must be non-negative' };
   }
 
+  // Cross-field: backoff must not exceed max_backoff when both are set
+  if (b.value != null && c.value != null && b.value > c.value) {
+    return { ok: false, message: 'Backoff (ms) must not exceed Max backoff (ms)' };
+  }
+
   let jitter: RetryJitterMode | null;
   if (draft.retry_jitter === 'inherit') jitter = null;
   else if (draft.retry_jitter === 'off' || draft.retry_jitter === 'uniform') jitter = draft.retry_jitter;
@@ -78,6 +83,15 @@ export function validateAndBuildRetryPatch(draft: RetryFormDraft): { ok: true; p
       retry_jitter: jitter,
     },
   };
+}
+
+/** Shared clock formatter for retry hint labels. */
+export function formatClock(ts: number): string {
+  try {
+    return new Date(ts).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+  } catch {
+    return String(ts);
+  }
 }
 
 export function formatResolutionSource(src: ResolvedTaskRetryConfig['resolution']['max_attempts']): string {

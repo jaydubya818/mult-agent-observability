@@ -9,6 +9,7 @@ import type {
   OrchestrationMetric,
   OrchestrationSnapshot,
   Task,
+  TaskRunHistoryRecord,
   TaskRunRecord,
   TaskStatus,
   TaskTransition,
@@ -148,6 +149,36 @@ export function initOrchestrationSchema(): void {
     CREATE INDEX IF NOT EXISTS idx_orch_task_trans_task ON orchestration_task_transitions(task_id);
     CREATE INDEX IF NOT EXISTS idx_orch_task_runs_team ON orchestration_task_runs(team_id);
     CREATE INDEX IF NOT EXISTS idx_orch_execution_policies_adapter ON orchestration_execution_policies(adapter_kind);
+  `);
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS orchestration_task_run_history (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      run_id TEXT NOT NULL UNIQUE,
+      task_id TEXT NOT NULL,
+      team_id TEXT NOT NULL,
+      agent_id TEXT,
+      environment_kind TEXT NOT NULL DEFAULT 'simulated',
+      status TEXT NOT NULL,
+      attempt INTEGER NOT NULL DEFAULT 1,
+      stdout_tail TEXT NOT NULL DEFAULT '',
+      stderr_tail TEXT NOT NULL DEFAULT '',
+      stdout_bytes INTEGER NOT NULL DEFAULT 0,
+      stderr_bytes INTEGER NOT NULL DEFAULT 0,
+      exit_code INTEGER,
+      started_at INTEGER,
+      finished_at INTEGER,
+      error_message TEXT,
+      termination_reason TEXT,
+      recorded_at INTEGER NOT NULL,
+      FOREIGN KEY (team_id) REFERENCES orchestration_teams(id) ON DELETE CASCADE,
+      FOREIGN KEY (task_id) REFERENCES orchestration_tasks(id) ON DELETE CASCADE
+    );
+    CREATE INDEX IF NOT EXISTS idx_orch_task_run_hist_team ON orchestration_task_run_history(team_id);
+    CREATE INDEX IF NOT EXISTS idx_orch_task_run_hist_task ON orchestration_task_run_history(task_id);
+    CREATE INDEX IF NOT EXISTS idx_orch_task_run_hist_status ON orchestration_task_run_history(status);
+    CREATE INDEX IF NOT EXISTS idx_orch_task_run_hist_finished ON orchestration_task_run_history(finished_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_orch_task_run_hist_team_finished ON orchestration_task_run_history(team_id, finished_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_orch_task_run_hist_task_finished ON orchestration_task_run_history(task_id, finished_at DESC);
   `);
   db.exec(`
     CREATE TABLE IF NOT EXISTS orchestration_admin_audit_log (
@@ -527,6 +558,7 @@ export function recordPreStartRejectedRun(input: {
     now,
     input.error_message
   );
+  archiveTerminalTaskRunSnapshot(input.task_id);
 }
 
 export function startTaskRun(input: {
@@ -613,6 +645,140 @@ export function finalizeTaskRun(
     input.termination_reason ?? null,
     taskId
   );
+  archiveTerminalTaskRunSnapshot(taskId);
+}
+
+const TERMINAL_TASK_RUN_STATUSES: readonly TaskRunRecord['status'][] = [
+  'completed',
+  'failed',
+  'cancelled',
+  'timed_out',
+  'policy_rejected',
+] as const;
+
+function isTerminalTaskRunStatus(s: string): s is TaskRunRecord['status'] {
+  return (TERMINAL_TASK_RUN_STATUSES as readonly string[]).includes(s);
+}
+
+function upsertTaskRunHistoryFromRecord(rec: TaskRunRecord): void {
+  if (rec.finished_at == null) return;
+  if (!isTerminalTaskRunStatus(rec.status)) return;
+  const recorded_at = rec.finished_at;
+  db.prepare(
+    `INSERT OR REPLACE INTO orchestration_task_run_history (
+       run_id, task_id, team_id, agent_id, environment_kind, status, attempt,
+       stdout_tail, stderr_tail, stdout_bytes, stderr_bytes, exit_code,
+       started_at, finished_at, error_message, termination_reason, recorded_at
+     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+  ).run(
+    rec.run_id,
+    rec.task_id,
+    rec.team_id,
+    rec.agent_id ?? null,
+    rec.environment_kind,
+    rec.status,
+    rec.attempt,
+    rec.stdout_tail,
+    rec.stderr_tail,
+    rec.stdout_bytes,
+    rec.stderr_bytes,
+    rec.exit_code ?? null,
+    rec.started_at ?? null,
+    rec.finished_at,
+    rec.error_message ?? null,
+    rec.termination_reason ?? null,
+    recorded_at
+  );
+}
+
+/** Persists the current `orchestration_task_runs` row into history when it is terminal (idempotent on `run_id`). */
+export function archiveTerminalTaskRunSnapshot(taskId: string): void {
+  const row = db.prepare(`SELECT * FROM orchestration_task_runs WHERE task_id = ?`).get(taskId) as any;
+  if (!row) return;
+  upsertTaskRunHistoryFromRecord(rowToTaskRun(row));
+}
+
+export type TaskRunHistoryQuery = {
+  team_id?: string;
+  task_id?: string;
+  status?: TaskRunRecord['status'];
+  started_at_min?: number;
+  started_at_max?: number;
+  finished_at_min?: number;
+  finished_at_max?: number;
+  /** Case-sensitive substring match against stdout_tail, stderr_tail, and error_message (LIKE %q%). */
+  q?: string;
+  limit?: number;
+  offset?: number;
+};
+
+function buildTaskRunHistoryWhere(filter: TaskRunHistoryQuery): { where: string; params: unknown[] } {
+  const conditions: string[] = [];
+  const params: unknown[] = [];
+  if (filter.team_id) {
+    conditions.push('team_id = ?');
+    params.push(filter.team_id);
+  }
+  if (filter.task_id) {
+    conditions.push('task_id = ?');
+    params.push(filter.task_id);
+  }
+  if (filter.status) {
+    conditions.push('status = ?');
+    params.push(filter.status);
+  }
+  if (filter.started_at_min != null) {
+    conditions.push('started_at IS NOT NULL AND started_at >= ?');
+    params.push(filter.started_at_min);
+  }
+  if (filter.started_at_max != null) {
+    conditions.push('started_at IS NOT NULL AND started_at <= ?');
+    params.push(filter.started_at_max);
+  }
+  if (filter.finished_at_min != null) {
+    conditions.push('finished_at IS NOT NULL AND finished_at >= ?');
+    params.push(filter.finished_at_min);
+  }
+  if (filter.finished_at_max != null) {
+    conditions.push('finished_at IS NOT NULL AND finished_at <= ?');
+    params.push(filter.finished_at_max);
+  }
+  if (filter.q != null && filter.q.trim() !== '') {
+    const escaped = filter.q.trim().replace(/\\/g, '\\\\').replace(/%/g, '\\%').replace(/_/g, '\\_');
+    const needle = `%${escaped}%`;
+    conditions.push(
+      `(stdout_tail LIKE ? ESCAPE '\\' OR stderr_tail LIKE ? ESCAPE '\\' OR IFNULL(error_message,'') LIKE ? ESCAPE '\\')`
+    );
+    params.push(needle, needle, needle);
+  }
+  const where = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
+  return { where, params };
+}
+
+function rowToTaskRunHistory(row: any): TaskRunHistoryRecord {
+  const base = rowToTaskRun(row);
+  return {
+    ...base,
+    history_id: Number(row.id),
+    recorded_at: Number(row.recorded_at ?? row.finished_at ?? 0),
+  };
+}
+
+export function countTaskRunHistory(filter: TaskRunHistoryQuery = {}): number {
+  const { where, params } = buildTaskRunHistoryWhere(filter);
+  const row = db.prepare(`SELECT COUNT(*) as c FROM orchestration_task_run_history ${where}`).get(...(params as any[])) as {
+    c: number;
+  };
+  return Number(row.c);
+}
+
+export function listTaskRunHistory(filter: TaskRunHistoryQuery = {}): TaskRunHistoryRecord[] {
+  const limit = Math.min(100, Math.max(1, filter.limit ?? 30));
+  const offset = Math.max(0, filter.offset ?? 0);
+  const { where, params } = buildTaskRunHistoryWhere(filter);
+  const sql = `SELECT * FROM orchestration_task_run_history ${where} ORDER BY finished_at DESC, id DESC LIMIT ? OFFSET ?`;
+  const rows = db.prepare(sql).all(...([...params, limit, offset] as any[])) as any[];
+  return rows.map(rowToTaskRunHistory);
 }
 
 function rowToTaskRun(row: any): TaskRunRecord {
@@ -1296,6 +1462,55 @@ export function pruneOrchestrationTaskRuns(maxDays?: number, maxRows?: number): 
         .prepare(
           `DELETE FROM orchestration_task_runs WHERE task_id IN (
             SELECT task_id FROM orchestration_task_runs
+            WHERE finished_at IS NOT NULL AND ${prunable}
+            ORDER BY finished_at ASC LIMIT ?
+          )`
+        )
+        .run(excess).changes;
+    }
+  }
+  return { removed_by_age, removed_by_row_cap };
+}
+
+/**
+ * Prune archived task run history (`orchestration_task_run_history`). Same eligibility and precedence
+ * as `pruneOrchestrationTaskRuns` (terminal `finished_at` only; age first, then global cap).
+ */
+export function pruneOrchestrationTaskRunHistory(maxDays?: number, maxRows?: number): {
+  removed_by_age: number;
+  removed_by_row_cap: number;
+} {
+  let removed_by_age = 0;
+  let removed_by_row_cap = 0;
+  const days = maxDays != null && maxDays > 0 ? maxDays : null;
+  const rowsCap = maxRows != null && maxRows > 0 ? maxRows : null;
+
+  const prunable = `status IN ('completed','failed','cancelled','timed_out','policy_rejected')`;
+
+  if (days != null) {
+    const cutoff = Date.now() - days * 24 * 60 * 60 * 1000;
+    removed_by_age = db
+      .prepare(
+        `DELETE FROM orchestration_task_run_history
+         WHERE finished_at IS NOT NULL AND finished_at < ?
+           AND ${prunable}`
+      )
+      .run(cutoff).changes;
+  }
+  if (rowsCap != null) {
+    const row = db
+      .prepare(
+        `SELECT COUNT(*) as c FROM orchestration_task_run_history
+         WHERE finished_at IS NOT NULL AND ${prunable}`
+      )
+      .get() as { c: number };
+    const total = Number(row.c);
+    if (total > rowsCap) {
+      const excess = total - rowsCap;
+      removed_by_row_cap = db
+        .prepare(
+          `DELETE FROM orchestration_task_run_history WHERE id IN (
+            SELECT id FROM orchestration_task_run_history
             WHERE finished_at IS NOT NULL AND ${prunable}
             ORDER BY finished_at ASC LIMIT ?
           )`

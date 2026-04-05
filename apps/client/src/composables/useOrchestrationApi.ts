@@ -1,5 +1,10 @@
 import { API_BASE_URL } from '../config';
-import type { AdminAuditRecord, MessageDirection, OrchestrationSnapshot } from '../orchestrationTypes';
+import type {
+  AdminAuditRecord,
+  MessageDirection,
+  OrchestrationSnapshot,
+  TaskRunHistoryRecord,
+} from '../orchestrationTypes';
 
 const root = `${API_BASE_URL}/api/orchestration`;
 
@@ -29,6 +34,48 @@ export function useOrchestrationApi() {
         execution_environment_kind:
           raw.execution_environment_kind ?? 'simulated',
       };
+    },
+
+    async listTaskRunHistory(
+      params: {
+        team_id?: string;
+        task_id?: string;
+        status?: string;
+        started_after?: number;
+        started_before?: number;
+        finished_after?: number;
+        finished_before?: number;
+        q?: string;
+        limit?: number;
+        offset?: number;
+      } = {}
+    ): Promise<{ runs: TaskRunHistoryRecord[]; total: number; limit: number; offset: number }> {
+      const q = new URLSearchParams();
+      if (params.team_id) q.set('team_id', params.team_id);
+      if (params.task_id) q.set('task_id', params.task_id);
+      if (params.status) q.set('status', params.status);
+      if (params.started_after != null) q.set('started_after', String(params.started_after));
+      if (params.started_before != null) q.set('started_before', String(params.started_before));
+      if (params.finished_after != null) q.set('finished_after', String(params.finished_after));
+      if (params.finished_before != null) q.set('finished_before', String(params.finished_before));
+      if (params.q) q.set('q', params.q);
+      if (params.limit != null) q.set('limit', String(params.limit));
+      if (params.offset != null) q.set('offset', String(params.offset));
+      const qs = q.toString();
+      return parse(await fetch(`${root}/task-runs${qs ? `?${qs}` : ''}`));
+    },
+
+    async listTaskRunHistoryForTask(
+      taskId: string,
+      params: { limit?: number; offset?: number; q?: string; status?: string } = {}
+    ): Promise<{ runs: TaskRunHistoryRecord[]; total: number; limit: number; offset: number }> {
+      const q = new URLSearchParams();
+      if (params.limit != null) q.set('limit', String(params.limit));
+      if (params.offset != null) q.set('offset', String(params.offset));
+      if (params.q) q.set('q', params.q);
+      if (params.status) q.set('status', params.status);
+      const qs = q.toString();
+      return parse(await fetch(`${root}/tasks/${taskId}/runs${qs ? `?${qs}` : ''}`));
     },
 
     async listTeams() {

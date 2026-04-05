@@ -55,6 +55,12 @@
     </div>
 
     <p v-if="localError" class="text-[var(--theme-accent-error)] text-[10px]">{{ localError }}</p>
+    <p v-if="saveAckAt > 0" class="text-[var(--theme-accent-success)] text-[10px] font-medium">
+      Saved · {{ formatClock(saveAckAt) }}
+    </p>
+    <p v-if="restoreHintAt > 0" class="text-[var(--theme-text-tertiary)] text-[10px]">
+      Form reloaded from server · {{ formatClock(restoreHintAt) }}
+    </p>
 
     <div class="flex flex-wrap gap-2">
       <button
@@ -78,22 +84,30 @@
 </template>
 
 <script setup lang="ts">
-import { ref, watch } from 'vue';
+import { onUnmounted, ref, watch } from 'vue';
 import type { OrchestrationTeam } from '../../orchestrationTypes';
 import RetryConfigEffectiveSummary from './RetryConfigEffectiveSummary.vue';
 import {
   draftFromRetryLayer,
+  formatClock,
   validateAndBuildRetryPatch,
   type RetryFormDraft,
 } from '../../utils/orchestrationRetryForm';
 
-const props = defineProps<{
-  team: OrchestrationTeam | null;
-  disabled?: boolean;
-}>();
+const props = withDefaults(
+  defineProps<{
+    team: OrchestrationTeam | null;
+    disabled?: boolean;
+    /** Epoch ms from parent after successful PATCH; 0 hides the hint. */
+    saveAckAt?: number;
+  }>(),
+  { saveAckAt: 0 }
+);
 
 const emit = defineEmits<{
   apply: [patch: Record<string, unknown>];
+  /** Clear parent "Saved" hint when local validation fails before PATCH. */
+  'clear-save-ack': [];
 }>();
 
 const draft = ref<RetryFormDraft>({
@@ -104,6 +118,16 @@ const draft = ref<RetryFormDraft>({
 });
 const localError = ref<string | null>(null);
 const prevTeamSyncKey = ref<string | null>(null);
+/** Brief "reloaded" note after Reset (local only; not persisted). */
+const restoreHintAt = ref(0);
+let restoreHintTimer: ReturnType<typeof setTimeout> | null = null;
+
+onUnmounted(() => {
+  if (restoreHintTimer) {
+    clearTimeout(restoreHintTimer);
+    restoreHintTimer = null;
+  }
+});
 
 function resetFromTeam() {
   const t = props.team;
@@ -111,6 +135,15 @@ function resetFromTeam() {
   draft.value = draftFromRetryLayer(t);
   localError.value = null;
   prevTeamSyncKey.value = `${t.id}:${t.updated_at}`;
+  if (restoreHintTimer) {
+    clearTimeout(restoreHintTimer);
+    restoreHintTimer = null;
+  }
+  restoreHintAt.value = Date.now();
+  restoreHintTimer = setTimeout(() => {
+    restoreHintAt.value = 0;
+    restoreHintTimer = null;
+  }, 2600);
 }
 
 watch(
@@ -125,6 +158,11 @@ watch(
       draft.value = draftFromRetryLayer(t);
       localError.value = null;
       prevTeamSyncKey.value = key;
+      restoreHintAt.value = 0;
+      if (restoreHintTimer) {
+        clearTimeout(restoreHintTimer);
+        restoreHintTimer = null;
+      }
     }
   },
   { immediate: true, deep: true }
@@ -132,9 +170,15 @@ watch(
 
 function onSave() {
   localError.value = null;
+  restoreHintAt.value = 0;
+  if (restoreHintTimer) {
+    clearTimeout(restoreHintTimer);
+    restoreHintTimer = null;
+  }
   const v = validateAndBuildRetryPatch(draft.value);
   if (!v.ok) {
     localError.value = v.message;
+    emit('clear-save-ack');
     return;
   }
   emit('apply', {

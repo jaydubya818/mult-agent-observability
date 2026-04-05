@@ -174,6 +174,12 @@ export interface TaskRunRecord {
   termination_reason: string | null;
 }
 
+/** Archived terminal run (GET /api/orchestration/task-runs). */
+export interface TaskRunHistoryRecord extends TaskRunRecord {
+  history_id: number;
+  recorded_at: number;
+}
+
 /** Admin mutation audit (server; no secrets in rows). */
 export interface AdminAuditRecord {
   id: string;

@@ -24,6 +24,14 @@
       <p v-else class="mt-2 text-[var(--theme-text-tertiary)]">No rows loaded.</p>
     </details>
 
+    <TaskRunHistorySection
+      ref="runHistorySectionRef"
+      :teams="snapshot?.teams ?? []"
+      :tasks="snapshot?.tasks ?? []"
+      :selected-team-id="selectedTeamId"
+      @open-task="onOpenTaskFromHistory"
+    />
+
     <div class="flex-1 flex flex-col lg:flex-row min-h-0 overflow-hidden">
       <TeamList
         :snapshot-ready="snapshotReady"
@@ -98,7 +106,9 @@
               v-if="activeTeam"
               :team="activeTeam"
               :disabled="busy"
+              :save-ack-at="teamRetrySaveAckAt"
               @apply="saveTeamRetry"
+              @clear-save-ack="onClearTeamRetryAck"
             />
           </div>
           <div class="flex flex-wrap gap-2">
@@ -137,7 +147,9 @@
           <PolicyRetryConfigList
             :policies="snapshot?.execution_policies ?? []"
             :disabled="busy"
+            :save-ack-at-by-policy-id="policyRetrySaveAckAt"
             @apply="savePolicyRetry"
+            @clear-save-ack="onClearPolicyRetryAck"
           />
 
           <OrchestrationAgentSwimlanes
@@ -230,6 +242,7 @@
       @close="closeTaskDetail"
       @cancel-task="cancelSelectedTask"
       @filter-events-to-task="onFilterEventsToTask"
+      @view-full-run-history="onViewFullRunHistory"
     />
 
     <p
@@ -242,7 +255,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from 'vue';
+import { computed, nextTick, onMounted, reactive, ref, watch } from 'vue';
 import type { HookEvent } from '../../types';
 import type {
   AdminAuditRecord,
@@ -264,6 +277,7 @@ import OrchestrationEventFeed from './OrchestrationEventFeed.vue';
 import TaskDetailPanel from './TaskDetailPanel.vue';
 import TeamRetryConfigPanel from './TeamRetryConfigPanel.vue';
 import PolicyRetryConfigList from './PolicyRetryConfigList.vue';
+import TaskRunHistorySection from './TaskRunHistorySection.vue';
 
 const emit = defineEmits<{ snapshot: [OrchestrationSnapshot] }>();
 
@@ -290,12 +304,36 @@ const hookTypeFilter = ref('');
 const taskHookFilterTaskId = ref<string | null>(null);
 const taskDetailOpen = ref(false);
 const selectedTaskId = ref<string | null>(null);
+/** Run history strip: `openForTask` exposed from `TaskRunHistorySection`. */
+const runHistorySectionRef = ref<{
+  openForTask: (taskId: string, teamId?: string) => Promise<void>;
+} | null>(null);
 
 const ORCH_ADMIN_STORAGE_KEY = 'orchestration_admin_token';
 const orchAdminTokenLocal = ref('');
 const policyAssignSelection = ref('');
 const adminAuditRows = ref<AdminAuditRecord[]>([]);
 const adminAuditLoading = ref(false);
+
+/** Epoch ms after successful team retry PATCH; 0 = hide inline "Saved" hint. */
+const teamRetrySaveAckAt = ref(0);
+/** Epoch ms per policy id after successful policy retry PATCH. */
+const policyRetrySaveAckAt = reactive<Record<string, number>>({});
+
+function clearRetrySaveHints() {
+  teamRetrySaveAckAt.value = 0;
+  for (const k of Object.keys(policyRetrySaveAckAt)) {
+    delete policyRetrySaveAckAt[k];
+  }
+}
+
+function onClearTeamRetryAck() {
+  teamRetrySaveAckAt.value = 0;
+}
+
+function onClearPolicyRetryAck(policyId: string) {
+  delete policyRetrySaveAckAt[policyId];
+}
 
 const snapshotReady = computed(() => props.snapshot !== null);
 
@@ -453,6 +491,18 @@ function openTaskDetail(taskId: string) {
   taskDetailOpen.value = true;
 }
 
+function onOpenTaskFromHistory(payload: { taskId: string; teamId: string }) {
+  selectedTeamId.value = payload.teamId;
+  openTaskDetail(payload.taskId);
+}
+
+function onViewFullRunHistory(payload: { taskId: string; teamId: string }) {
+  selectedTeamId.value = payload.teamId;
+  void nextTick(() => {
+    void runHistorySectionRef.value?.openForTask(payload.taskId, payload.teamId);
+  });
+}
+
 function closeTaskDetail() {
   taskDetailOpen.value = false;
 }
@@ -502,13 +552,17 @@ function auditOutcomeClass(outcome: AdminAuditRecord['outcome']): string {
   }
 }
 
-async function runWithError(fn: () => Promise<void>) {
+/** Returns true if `fn` completed without throwing. Clears retry save hints when the request fails. */
+async function runWithError(fn: () => Promise<void>): Promise<boolean> {
   orchError.value = null;
   busy.value = true;
   try {
     await fn();
+    return true;
   } catch (e) {
     orchError.value = e instanceof Error ? e.message : String(e);
+    clearRetrySaveHints();
+    return false;
   } finally {
     busy.value = false;
   }
@@ -537,19 +591,23 @@ async function applyTeamPolicyAssignment() {
 
 async function saveTeamRetry(patch: Record<string, unknown>) {
   if (!activeTeam.value) return;
-  await runWithError(async () => {
+  teamRetrySaveAckAt.value = 0;
+  const ok = await runWithError(async () => {
     await api.patchTeam(activeTeam.value!.id, patch, orchAdminTokenLocal.value || undefined);
     const snap: OrchestrationSnapshot = await api.fetchSnapshot();
     emit('snapshot', snap);
   });
+  if (ok) teamRetrySaveAckAt.value = Date.now();
 }
 
 async function savePolicyRetry(policyId: string, patch: Record<string, unknown>) {
-  await runWithError(async () => {
+  delete policyRetrySaveAckAt[policyId];
+  const ok = await runWithError(async () => {
     await api.patchExecutionPolicy(policyId, patch, orchAdminTokenLocal.value || undefined);
     const snap: OrchestrationSnapshot = await api.fetchSnapshot();
     emit('snapshot', snap);
   });
+  if (ok) policyRetrySaveAckAt[policyId] = Date.now();
 }
 
 async function runSeedDemo() {

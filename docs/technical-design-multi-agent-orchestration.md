@@ -116,7 +116,8 @@ See PRD functional requirements; physical mapping:
 - `orchestration_messages` — direction, body, optional agent ids
 - `orchestration_metrics` — key/value/unit/time series
 - `orchestration_execution_policies` — persisted guardrails per `adapter_kind` (MVP: `local_process`): `cmd_allowlist`, `cmd_denylist`, `max_ms`, `max_concurrent`, `cwd_allowlist`, `env_allowlist`, `max_output_bytes`, timestamps
-- `orchestration_task_runs` — **one row per `task_id`** (upserted on each execution); holds latest run correlation (`run_id`, tails, termination, etc.) including **stub rows** for pre-start failures (see §11). Not a multi-row per-task history table; pruning removes whole rows for old terminal runs (§6.3).
+- `orchestration_task_runs` — **one row per `task_id`** (upserted on each execution); holds the **live / latest** run correlation (`run_id`, stream tails, termination, etc.) including **stub rows** for pre-start failures (see §11). This is the source for `OrchestrationSnapshot.task_runs` and the task detail “current run” panel.
+- `orchestration_task_run_history` — **append-only archive of terminal runs** (one row per unique `run_id`). Each call to `finalizeTaskRun` (terminal status) or `recordPreStartRejectedRun` snapshots the current run row into history via `INSERT OR REPLACE` on `run_id`, so **retries produce multiple history rows per task**. In-flight executions are **not** listed here until they finish. Pruning uses the **same** env caps as task runs (§6.3). Deleting a task cascades history rows.
 
 Cascade: delete team removes children (FK `ON DELETE CASCADE`). Deleting a policy sets team `execution_policy_id` to null (`ON DELETE SET NULL`).
 
@@ -143,6 +144,8 @@ Base: `/api/orchestration`
 | Method | Path | Notes |
 |--------|------|--------|
 | GET | `/snapshot` | Full snapshot |
+| GET | `/task-runs` | **Archived** terminal runs (`orchestration_task_run_history`). Paginated read API; does not include in-flight-only state (see query params below). |
+| GET | `/tasks/:id/runs` | Same as `/task-runs` with `task_id` fixed to `:id` (404 if task missing). |
 | GET | `/teams` | Teams + summaries |
 | POST | `/teams` | Create |
 | GET | `/teams/:id` | Detail bundle |
@@ -196,13 +199,40 @@ This is a **shared-secret gate** for sensitive orchestration mutations—not ide
 | POST | `/teams` | Only if body contains key `execution_policy_id` |
 | POST | `/admin/prune-history` | Apply configured retention (same token as other admin mutations) |
 
-**Still open (read + most operator actions):** `GET` snapshot, teams, policies, effective policy, PATCH team **without** `execution_policy_id`, task/agent CRUD, execution start/stop, etc.
+**Still open (read + most operator actions):** `GET` snapshot, **`GET` task-runs / task run history**, teams, policies, effective policy, PATCH team **without** `execution_policy_id`, task/agent CRUD, execution start/stop, etc.
 
 **`GET /admin-audit` auth:** When `ORCH_ADMIN_TOKEN` is **set**, the same token is required to list audit rows. In **open mode**, `GET /admin-audit` is readable without a token (local trust boundary only).
 
 **`POST /admin/prune-history` auth:** Same as other protected mutations when `ORCH_ADMIN_TOKEN` is set; in open mode, any client may invoke it (still a sharp tool—restrict at the network layer in production).
 
 Query parameters (all optional): `limit` (default 100, max 500), `outcome` (`success` \| `denied` \| `invalid`), `action`, `route` (exact path), `target_entity_type`, `target_entity_id`.
+
+#### `GET /task-runs` and `GET /tasks/:id/runs` (execution history)
+
+Read-only, **not** gated by `ORCH_ADMIN_TOKEN` (same trust model as snapshot). Response shape:
+
+```json
+{ "runs": [/* TaskRunHistoryRecord[] */], "total": number, "limit": number, "offset": number }
+```
+
+Each run includes `history_id`, `recorded_at`, plus the same fields as a `TaskRunRecord` (`task_id`, `run_id`, `team_id`, `environment_kind`, `status`, `attempt`, tails, `exit_code`, timestamps, `error_message`, `termination_reason`).
+
+**Query parameters (all optional, ANDed):**
+
+| Param | Meaning |
+|-------|--------|
+| `team_id` | Exact team id |
+| `task_id` | Ignored on `/tasks/:id/runs` (path wins) |
+| `status` | One of `pending`, `running`, `completed`, `failed`, `cancelled`, `timed_out`, `policy_rejected` (history rows are normally terminal; `pending`/`running` will usually match nothing) |
+| `started_after`, `started_before` | Epoch ms bounds on `started_at` (both ends inclusive; null `started_at` excluded) |
+| `finished_after`, `finished_before` | Epoch ms bounds on `finished_at` |
+| `q` | Case-sensitive substring search: matches if `stdout_tail`, `stderr_tail`, or `error_message` contains the string (SQL `LIKE` with `%` wildcards escaped in the needle only) |
+| `limit` | Page size, default **30**, max **100** |
+| `offset` | Pagination offset, default **0** |
+
+**Semantics / limitations:** History is **best-effort operator inspection**, not a compliance log: rows can be **deleted** by retention; very large tails remain truncated per policy; `q` is a simple substring match (no full-text index). **Live** runs continue to appear only on the snapshot / task detail until finalized.
+
+**Client (task detail):** `TaskDetailPanel` lazy-loads `GET /tasks/:id/runs` when the drawer opens (and refreshes when the snapshot run identity or status changes). A collapsed **Prior attempts (archived)** strip lists recent rows; the **Current run (snapshot)** block is labeled explicitly and uses `task_runs` from `orchestration_state`. The archived list **omits** the history row whose `run_id` matches the current snapshot run when both refer to the same attempt (avoids duplicating the latest terminal run). **View full run history** in the drawer opens the main **Run history** `<details>` panel, pre-fills **Task id** and **Team** (both visible and editable), runs a fetch, and scrolls the section into view — no router or extra navigation layer.
 
 **CORS:** `Access-Control-Allow-Headers` includes `Authorization` and `x-orchestration-admin-token` for browser clients.
 
@@ -238,18 +268,18 @@ Env-configured retention prevents audit and task-run tables from growing without
 |----------|--------|--------|
 | `ORCH_ADMIN_AUDIT_MAX_DAYS` | `orchestration_admin_audit_log` | Delete rows with `created_at` older than N days (omit or ≤0: disabled). |
 | `ORCH_ADMIN_AUDIT_MAX_ROWS` | `orchestration_admin_audit_log` | After age step, keep at most **N** rows by deleting **oldest** `created_at` first (omit or ≤0: disabled). |
-| `ORCH_TASK_RUNS_MAX_DAYS` | `orchestration_task_runs` | Delete **prunable** rows (see below) with `finished_at` older than N days. |
-| `ORCH_TASK_RUNS_MAX_ROWS` | `orchestration_task_runs` | After age step, cap **prunable** rows globally—drop oldest by `finished_at` until count ≤ N. |
+| `ORCH_TASK_RUNS_MAX_DAYS` | `orchestration_task_runs` **and** `orchestration_task_run_history` | Delete **prunable** rows with `finished_at` older than N days (each table pruned independently with the same cutoff). |
+| `ORCH_TASK_RUNS_MAX_ROWS` | `orchestration_task_runs` **and** `orchestration_task_run_history` | After age step, cap **prunable** rows **per table**—drop oldest by `finished_at` until count ≤ N. |
 
 **Precedence when both age and row cap are set (each table):** **age-based deletion runs first**, then **row-cap** trims excess among remaining rows.
 
-**`orchestration_task_runs` prunable rows:** `status IN ('completed','failed','cancelled','timed_out','policy_rejected')` **and** `finished_at IS NOT NULL`. Rows in **`pending`** or **`running`** are never deleted by retention.
+**Prunable rows (each of `orchestration_task_runs` and `orchestration_task_run_history`):** `status IN ('completed','failed','cancelled','timed_out','policy_rejected')` **and** `finished_at IS NOT NULL`. Rows in **`pending`** or **`running`** are never deleted by retention (in practice, history rows are always terminal).
 
-**What is preserved:** All non-prunable task runs; all audit rows inside the age window and within the row cap; tasks/agents/teams/policies are untouched.
+**What is preserved:** All non-prunable live task runs; audit rows inside configured windows; tasks/agents/teams/policies are untouched. **Historical** terminal runs older than limits are removed from `orchestration_task_run_history` as well—`GET /task-runs` will eventually stop returning them.
 
-**Observability:** If any row was deleted, the server emits **one structured `console.log` line** to stdout: `[orchestration:retention]` plus JSON summary (`removed_by_*`, config echo). The hook **event** stream is not used (avoids noise). Manual `POST /admin/prune-history` also appends an admin-audit **`retention_prune`** success row with aggregate counts.
+**Observability:** If any row was deleted, the server emits **one structured `console.log` line** to stdout: `[orchestration:retention]` plus JSON summary (`removed_by_*` per table, `task_run_history` included, config echo). The hook **event** stream is not used (avoids noise). Manual `POST /admin/prune-history` also appends an admin-audit **`retention_prune`** success row with aggregate counts (`task_run_history_removed` in metadata).
 
-**Limitations:** Startup prune runs before traffic—brief extra work on boot. No per-tenant retention. Row caps are **global** for task runs (not per team). Trimming **deletes** run rows outright—UI may show “no execution record” for old tasks until re-run; this is intentional hygiene, not archival. For compliance archives, export DB or ship logs separately.
+**Limitations:** Startup prune runs before traffic—brief extra work on boot. No per-tenant retention. Row caps are **global** per table (not per team). Trimming **deletes** data outright—**`GET /task-runs` is not an immutable audit trail**; for strict long-term retention, export the DB or ship logs separately.
 
 ### 6.4 Task execution retries (transient failures)
 
@@ -337,6 +367,9 @@ Not a workflow engine: **no DAG**, no step-level retries, no per-**task** API ov
 - **Execution policy** (`PATCH /api/orchestration/policies/:id`): same optional `retry_*` fields; requires admin token when the server enforces protected admin routes.
 - **Effective display**: the team panel shows **`team.resolved_retry`** (post-resolution) plus a collapsible **per-field source** line (team / policy / env / default) — same semantics as `ResolvedTaskRetryConfig.resolution` on the server.
 - **Policy list editor** edits **policy columns only**; effective behavior for a running task is always computed with **team beating policy** per field.
+- **Save feedback (client):** after a successful retry PATCH, a **short inline “Saved · time”** line appears under the team or policy row. **Reset** shows a brief **“Form reloaded…”** note (local draft only; no API). If **validation fails before PATCH** or **any orchestration mutation errors** (`orchError` banner), retry **Saved** hints are **cleared** so stale success text cannot sit beside an error.
+
+**CI:** `.github/workflows/ci.yml` runs `bun run typecheck` + `bun run test` in `apps/server`, then `bun run test` + `bun run build` in `apps/client` (includes `src/utils` retry-form unit tests).
 
 All orchestration controls must hit real endpoints and reflect updates via WS snapshot (or explicit refresh emit where GET-only).
 

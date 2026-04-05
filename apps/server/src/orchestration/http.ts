@@ -10,6 +10,7 @@ import {
   createExecutionPolicy,
   createTask,
   createTeam,
+  countTaskRunHistory,
   deleteTeam,
   getEffectiveLocalProcessPolicyForTeam,
   getExecutionPolicyById,
@@ -23,6 +24,7 @@ import {
   listExecutionPolicies,
   listMessages,
   listMetrics,
+  listTaskRunHistory,
   listTasksByTeam,
   listTeams,
   setTeamExecutionPolicy,
@@ -30,9 +32,10 @@ import {
   updateExecutionPolicy,
   updateTask,
   updateTeam,
+  type TaskRunHistoryQuery,
 } from './repository';
 import { runOrchestrationRetentionPrune } from './retention';
-import type { MessageDirection, MessageKind, RetryJitterMode, TaskStatus } from './types';
+import type { MessageDirection, MessageKind, RetryJitterMode, TaskRunStatus, TaskStatus } from './types';
 
 function parseRetryConfigFields(body: Record<string, unknown>): Partial<{
   retry_max_attempts: number | null;
@@ -79,6 +82,67 @@ function json(data: unknown, status = 200, extraHeaders: Record<string, string> 
 
 function parsePath(pathname: string): string[] {
   return pathname.split('/').filter(Boolean);
+}
+
+const TASK_RUN_HISTORY_STATUSES: TaskRunStatus[] = [
+  'pending',
+  'running',
+  'completed',
+  'failed',
+  'cancelled',
+  'timed_out',
+  'policy_rejected',
+];
+
+function parseTaskRunHistoryQuery(
+  url: URL,
+  fixed?: { task_id: string }
+): { ok: true; query: TaskRunHistoryQuery } | { ok: false; error: string } {
+  const limitRaw = url.searchParams.get('limit');
+  const offsetRaw = url.searchParams.get('offset');
+  let limit = limitRaw != null ? parseInt(limitRaw, 10) : 30;
+  let offset = offsetRaw != null ? parseInt(offsetRaw, 10) : 0;
+  if (!Number.isFinite(limit) || limit < 1) limit = 30;
+  if (!Number.isFinite(offset) || offset < 0) offset = 0;
+
+  const team_id = url.searchParams.get('team_id')?.trim() || undefined;
+  const urlTaskId = url.searchParams.get('task_id')?.trim() || undefined;
+  const task_id = fixed?.task_id ?? urlTaskId;
+
+  const statusRaw = url.searchParams.get('status')?.trim();
+  let status: TaskRunStatus | undefined;
+  if (statusRaw) {
+    if (!TASK_RUN_HISTORY_STATUSES.includes(statusRaw as TaskRunStatus)) {
+      return { ok: false, error: 'invalid status' };
+    }
+    status = statusRaw as TaskRunStatus;
+  }
+
+  const parseMs = (key: string): number | undefined => {
+    const v = url.searchParams.get(key);
+    if (v == null || v.trim() === '') return undefined;
+    const n = parseInt(v.trim(), 10);
+    return Number.isFinite(n) ? n : undefined;
+  };
+
+  const qRaw = url.searchParams.get('q');
+  const q = qRaw != null && qRaw.trim() !== '' ? qRaw : undefined;
+
+  return {
+    ok: true,
+    query: {
+      team_id,
+      task_id,
+      status,
+      started_at_min: parseMs('started_after'),
+      started_at_max: parseMs('started_before'),
+      finished_at_min: parseMs('finished_after'),
+      finished_at_max: parseMs('finished_before'),
+      q,
+      limit,
+      offset,
+    },
+  };
 }
 
 export type OrchestrationHttpContext = {
@@ -184,6 +248,24 @@ export async function handleOrchestrationRequest(
       return new Response(JSON.stringify(getOrchestrationSnapshot()), { headers: h });
     }
 
+    // GET /api/orchestration/task-runs  (archived terminal runs; see technical design)
+    if (req.method === 'GET' && parts[2] === 'task-runs' && parts.length === 3) {
+      const parsed = parseTaskRunHistoryQuery(url);
+      if (!parsed.ok) return json({ error: parsed.error }, 400, h);
+      const total = countTaskRunHistory(parsed.query);
+      const runs = listTaskRunHistory(parsed.query);
+      return json(
+        {
+          runs,
+          total,
+          limit: parsed.query.limit ?? 30,
+          offset: parsed.query.offset ?? 0,
+        },
+        200,
+        h
+      );
+    }
+
     // GET /api/orchestration/admin-audit
     if (req.method === 'GET' && parts[2] === 'admin-audit' && parts.length === 3) {
       const denied = requireOrchestrationAdmin(req, corsHeaders);
@@ -212,6 +294,8 @@ export async function handleOrchestrationRequest(
           total_rows_removed: summary.total_rows_removed,
           admin_audit_removed: summary.admin_audit.removed_by_age + summary.admin_audit.removed_by_row_cap,
           task_runs_removed: summary.task_runs.removed_by_age + summary.task_runs.removed_by_row_cap,
+          task_run_history_removed:
+            summary.task_run_history.removed_by_age + summary.task_run_history.removed_by_row_cap,
         },
       });
       return json({ ok: true, summary }, 200, h);
@@ -625,6 +709,27 @@ export async function handleOrchestrationRequest(
       });
       if (!updated) return json({ error: 'agent not found' }, 404, h);
       return new Response(JSON.stringify(updated), { headers: h });
+    }
+
+    // GET /api/orchestration/tasks/:taskId/runs
+    if (req.method === 'GET' && parts[2] === 'tasks' && parts.length === 5 && parts[4] === 'runs') {
+      const taskId = parts[3];
+      if (!taskId) return json({ error: 'task id required' }, 400, h);
+      if (!getTaskById(taskId)) return json({ error: 'task not found' }, 404, h);
+      const parsed = parseTaskRunHistoryQuery(url, { task_id: taskId });
+      if (!parsed.ok) return json({ error: parsed.error }, 400, h);
+      const total = countTaskRunHistory(parsed.query);
+      const runs = listTaskRunHistory(parsed.query);
+      return json(
+        {
+          runs,
+          total,
+          limit: parsed.query.limit ?? 30,
+          offset: parsed.query.offset ?? 0,
+        },
+        200,
+        h
+      );
     }
 
     // GET /api/orchestration/tasks/:taskId

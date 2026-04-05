@@ -65,9 +65,12 @@
             </p>
           </div>
 
-          <div v-if="taskRun" class="rounded-lg border border-[var(--theme-border-secondary)] bg-[var(--theme-bg-secondary)]/50 p-3 space-y-2">
+          <div v-if="taskRun" class="rounded-lg border border-[var(--theme-accent-info)]/25 bg-[var(--theme-bg-secondary)]/50 p-3 space-y-2">
             <div class="flex flex-wrap items-center justify-between gap-2">
-              <span class="text-xs font-bold uppercase text-[var(--theme-text-tertiary)]">Execution</span>
+              <div>
+                <span class="text-xs font-bold uppercase text-[var(--theme-text-tertiary)]">Current run</span>
+                <span class="text-[10px] text-[var(--theme-text-tertiary)] ml-1 font-normal normal-case">(live snapshot)</span>
+              </div>
               <span
                 class="rounded px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide"
                 :class="runStatusBadgeClass(taskRun.status)"
@@ -75,6 +78,10 @@
                 {{ taskRun.status }}
               </span>
             </div>
+            <p class="text-[10px] text-[var(--theme-text-tertiary)] leading-snug">
+              From <span class="font-mono">orchestration_state</span> — the active row for this task, including in-flight runs.
+              Terminal attempts are also copied to history; older tries appear under <span class="font-semibold">Prior attempts</span> below.
+            </p>
             <button
               type="button"
               class="text-[10px] font-semibold text-[var(--theme-accent-info)] underline"
@@ -139,6 +146,79 @@
           </div>
           <p v-else class="text-xs text-[var(--theme-text-tertiary)]">No execution record for this task yet.</p>
 
+          <details v-if="task" class="rounded-lg border border-[var(--theme-border-secondary)] bg-[var(--theme-bg-secondary)]/30 p-2">
+            <summary class="text-xs font-bold uppercase text-[var(--theme-text-tertiary)] cursor-pointer select-none">
+              Prior attempts
+              <span class="font-normal normal-case text-[10px] text-[var(--theme-text-tertiary)]">
+                (archived · {{ archivedHistoryLabel }})
+              </span>
+            </summary>
+            <p class="text-[10px] text-[var(--theme-text-tertiary)] mt-2 leading-snug">
+              Read-only terminal runs from
+              <span class="font-mono">/api/orchestration/tasks/…/runs</span>. Not live — if this task is running, the attempt
+              in progress is only under <span class="font-semibold">Current run</span> above.
+            </p>
+            <p v-if="historyLoading" class="text-[10px] text-[var(--theme-text-tertiary)] mt-2">Loading history…</p>
+            <p v-else-if="historyError" class="text-[10px] text-[var(--theme-accent-error)] mt-2">{{ historyError }}</p>
+            <p
+              v-else-if="!displayedHistory.length && historyRuns.length === 0"
+              class="text-[10px] text-[var(--theme-text-tertiary)] mt-2"
+            >
+              No archived runs for this task yet.
+            </p>
+            <p
+              v-else-if="!displayedHistory.length && historyRuns.length > 0"
+              class="text-[10px] text-[var(--theme-text-tertiary)] mt-2"
+            >
+              Archived data matches <span class="font-semibold">Current run</span> only — listed above so it is not
+              duplicated here. Older attempts appear here after retries or new run ids.
+            </p>
+            <ul v-else class="mt-2 space-y-1 max-h-48 overflow-y-auto border-t border-[var(--theme-border-tertiary)]/50 pt-2">
+              <li
+                v-for="h in displayedHistory"
+                :key="h.history_id"
+                class="rounded border border-[var(--theme-border-tertiary)]/40 bg-[var(--theme-bg-primary)]/40"
+              >
+                <details class="px-2 py-1">
+                  <summary class="cursor-pointer text-[10px] text-[var(--theme-text-secondary)] list-none flex flex-wrap gap-x-2 gap-y-0.5 items-center [&::-webkit-details-marker]:hidden">
+                    <span class="font-mono text-[var(--theme-text-tertiary)]">{{ formatTs(h.started_at) }}</span>
+                    <span class="text-[var(--theme-text-tertiary)]">→</span>
+                    <span class="font-mono text-[var(--theme-text-tertiary)]">{{ formatTs(h.finished_at) }}</span>
+                    <span
+                      class="rounded px-1.5 py-0.5 text-[9px] font-semibold uppercase"
+                      :class="runStatusBadgeClass(h.status)"
+                    >
+                      {{ h.status }}
+                    </span>
+                    <span class="font-mono text-[9px]">att {{ h.attempt }}</span>
+                    <span class="font-mono text-[9px]">exit {{ h.exit_code ?? '—' }}</span>
+                    <span class="font-mono text-[9px] truncate max-w-[7rem]" :title="h.environment_kind">{{ h.environment_kind }}</span>
+                    <span class="font-mono text-[9px] truncate max-w-[6rem]" :title="h.termination_reason ?? ''">{{
+                      h.termination_reason ?? '—'
+                    }}</span>
+                  </summary>
+                  <dl class="grid grid-cols-[auto_1fr] gap-x-2 gap-y-0.5 text-[9px] mt-2 pl-1 border-l-2 border-[var(--theme-border-secondary)]">
+                    <dt class="text-[var(--theme-text-tertiary)]">Run id</dt>
+                    <dd class="font-mono truncate" :title="h.run_id">{{ shortRunId(h.run_id) }}</dd>
+                    <dt class="text-[var(--theme-text-tertiary)]">Preview</dt>
+                    <dd class="text-[var(--theme-text-tertiary)] break-words">{{ previewArchived(h) }}</dd>
+                  </dl>
+                </details>
+              </li>
+            </ul>
+          </details>
+
+          <p v-if="task" class="text-[10px] text-[var(--theme-text-tertiary)] leading-snug">
+            <button
+              type="button"
+              class="font-semibold text-[var(--theme-accent-info)] underline"
+              @click="$emit('view-full-run-history', { taskId: task.id, teamId: task.team_id })"
+            >
+              View full run history
+            </button>
+            — opens the main Run history panel with Task id and Team pre-filled (editable there).
+          </p>
+
           <div>
             <span class="text-xs font-bold uppercase text-[var(--theme-text-tertiary)]">Transition history</span>
             <p v-if="!transitions.length" class="text-xs text-[var(--theme-text-tertiary)] mt-1">No transitions recorded.</p>
@@ -165,15 +245,18 @@
 </template>
 
 <script setup lang="ts">
-import { computed } from 'vue';
+import { computed, ref, watch } from 'vue';
+import { useOrchestrationApi } from '../../composables/useOrchestrationApi';
 import type {
   OrchestrationAgent,
   OrchestrationTask,
+  TaskRunHistoryRecord,
   TaskRunRecord,
   TaskRunStatus,
   TaskTransition,
 } from '../../orchestrationTypes';
 import { formatOrchestrationTime } from '../../utils/orchestrationFormat';
+import { dedupeHistoryVsLiveSnapshot, taskRunHistoryPreview } from '../../utils/taskRunHistoryDisplay';
 
 const props = defineProps<{
   open: boolean;
@@ -186,7 +269,73 @@ const props = defineProps<{
   cancelBusy?: boolean;
 }>();
 
-defineEmits<{ close: []; 'cancel-task': []; 'filter-events-to-task': [taskId: string] }>();
+defineEmits<{
+  close: [];
+  'cancel-task': [];
+  'filter-events-to-task': [taskId: string];
+  'view-full-run-history': [payload: { taskId: string; teamId: string }];
+}>();
+
+const api = useOrchestrationApi();
+const historyLoading = ref(false);
+const historyError = ref<string | null>(null);
+const historyRuns = ref<TaskRunHistoryRecord[]>([]);
+
+const TASK_HISTORY_PAGE_SIZE = 12;
+
+async function loadTaskHistory(): Promise<void> {
+  if (!props.open || !props.task) return;
+  historyLoading.value = true;
+  historyError.value = null;
+  try {
+    const res = await api.listTaskRunHistoryForTask(props.task.id, { limit: TASK_HISTORY_PAGE_SIZE });
+    historyRuns.value = res.runs;
+  } catch (e) {
+    historyError.value = e instanceof Error ? e.message : String(e);
+    historyRuns.value = [];
+  } finally {
+    historyLoading.value = false;
+  }
+}
+
+watch(
+  () =>
+    [
+      props.open,
+      props.task?.id,
+      props.taskRun?.run_id,
+      props.taskRun?.status,
+      props.taskRun?.finished_at,
+    ] as const,
+  ([isOpen, taskId]) => {
+    if (isOpen && taskId) {
+      void loadTaskHistory();
+    } else if (!isOpen) {
+      historyRuns.value = [];
+      historyError.value = null;
+    }
+  },
+  { immediate: true }
+);
+
+const displayedHistory = computed(() =>
+  dedupeHistoryVsLiveSnapshot(historyRuns.value, props.taskRun?.run_id)
+);
+
+const archivedHistoryLabel = computed(() => {
+  if (historyLoading.value) return 'loading…';
+  if (historyError.value) return 'error';
+  const n = displayedHistory.value.length;
+  const raw = historyRuns.value.length;
+  if (raw === 0) return 'none';
+  if (n === 0 && raw > 0) return 'only current · in snapshot above';
+  if (raw > n) return `${n} prior · ${raw - n} same as current`;
+  return `${n} recent`;
+});
+
+function previewArchived(h: TaskRunHistoryRecord): string {
+  return taskRunHistoryPreview(h);
+}
 
 const policyRejectionDetail = computed(() => {
   const r = props.taskRun;

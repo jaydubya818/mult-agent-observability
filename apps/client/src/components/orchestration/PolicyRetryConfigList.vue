@@ -53,6 +53,12 @@
         </div>
 
         <p v-if="errors[p.id]" class="text-[var(--theme-accent-error)] text-[9px]">{{ errors[p.id] }}</p>
+        <p v-if="saveAckAtByPolicyId[p.id]" class="text-[var(--theme-accent-success)] text-[9px] font-medium">
+          Saved · {{ retryFormFormatClock(saveAckAtByPolicyId[p.id]!) }}
+        </p>
+        <p v-if="restoreNoteAt[p.id]" class="text-[var(--theme-text-tertiary)] text-[9px]">
+          Form reloaded · {{ retryFormFormatClock(restoreNoteAt[p.id]!) }}
+        </p>
 
         <div class="flex gap-2">
           <button
@@ -78,23 +84,44 @@
 </template>
 
 <script setup lang="ts">
-import { reactive, ref, watch } from 'vue';
+import { onBeforeUnmount, reactive, ref, watch } from 'vue';
 import type { ExecutionPolicy } from '../../orchestrationTypes';
-import { draftFromRetryLayer, validateAndBuildRetryPatch, type RetryFormDraft } from '../../utils/orchestrationRetryForm';
+import {
+  draftFromRetryLayer,
+  formatClock as retryFormFormatClock,
+  validateAndBuildRetryPatch,
+  type RetryFormDraft,
+} from '../../utils/orchestrationRetryForm';
 
-const props = defineProps<{
-  policies: ExecutionPolicy[];
-  disabled?: boolean;
-}>();
+const props = withDefaults(
+  defineProps<{
+    policies: ExecutionPolicy[];
+    disabled?: boolean;
+    /** Epoch ms per policy after successful retry PATCH. */
+    saveAckAtByPolicyId?: Record<string, number>;
+  }>(),
+  { saveAckAtByPolicyId: () => ({}) }
+);
 
 const emit = defineEmits<{
   apply: [policyId: string, patch: Record<string, unknown>];
+  'clear-save-ack': [policyId: string];
 }>();
 
 const drafts = reactive<Record<string, RetryFormDraft>>({});
 const errors = reactive<Record<string, string | undefined>>({});
+/** Brief "reloaded" epoch per policy after Reset (local). */
+const restoreNoteAt = reactive<Record<string, number>>({});
+const restoreTimers: Record<string, ReturnType<typeof setTimeout>> = {};
 /** Last seen `updated_at` per policy; when server changes, reload draft from row. */
 const prevPolicyUpdated = ref<Record<string, number>>({});
+
+onBeforeUnmount(() => {
+  for (const id of Object.keys(restoreTimers)) {
+    clearTimeout(restoreTimers[id]);
+    delete restoreTimers[id];
+  }
+});
 
 watch(
   () => props.policies,
@@ -105,6 +132,12 @@ watch(
         delete drafts[id];
         delete errors[id];
         delete prevPolicyUpdated.value[id];
+        delete restoreNoteAt[id];
+        const t = restoreTimers[id];
+        if (t) {
+           clearTimeout(t);
+           delete restoreTimers[id];
+        }
       }
     }
     for (const p of list) {
@@ -125,16 +158,30 @@ function resetPolicy(id: string) {
     drafts[id] = draftFromRetryLayer(p);
     errors[id] = undefined;
     prevPolicyUpdated.value = { ...prevPolicyUpdated.value, [id]: p.updated_at };
+    const prevT = restoreTimers[id];
+    if (prevT) clearTimeout(prevT);
+    restoreNoteAt[id] = Date.now();
+    restoreTimers[id] = setTimeout(() => {
+      delete restoreNoteAt[id];
+      delete restoreTimers[id];
+    }, 2600);
   }
 }
 
 function savePolicy(id: string) {
   errors[id] = undefined;
+  const prevR = restoreTimers[id];
+  if (prevR) {
+    clearTimeout(prevR);
+    delete restoreTimers[id];
+  }
+  delete restoreNoteAt[id];
   const d = drafts[id];
   if (!d) return;
   const v = validateAndBuildRetryPatch(d);
   if (!v.ok) {
     errors[id] = v.message;
+    emit('clear-save-ack', id);
     return;
   }
   emit('apply', id, {

@@ -1,0 +1,25 @@
+name: CI
+
+on: [push, pull_request]
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - name: Server — install, typecheck, tests
+        working-directory: apps/server
+        run: |
+          bun install
+          bun run typecheck
+          bun run test
+      - name: Client — install, unit tests, build
+        working-directory: apps/client
+        run: |
+          bun install
+          bun run test
+          bun run build

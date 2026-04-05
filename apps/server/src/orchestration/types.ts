@@ -194,6 +194,13 @@ export interface TaskRunRecord {
   termination_reason: string | null;
 }
 
+/** Immutable row archived when a task run reaches a terminal state (§ technical design). */
+export interface TaskRunHistoryRecord extends TaskRunRecord {
+  history_id: number;
+  /** Wall time when the row was archived (milliseconds); usually equals `finished_at`. */
+  recorded_at: number;
+}
+
 export interface OrchestrationSnapshot {
   teams: Team[];
   team_summaries: TeamSummary[];
