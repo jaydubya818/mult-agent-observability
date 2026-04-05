@@ -38,10 +38,16 @@ function extractContextWindowPercent(payload: Record<string, any>): number | nul
   return null;
 }
 
-/** Upsert a team by specific ID (preserving the ID from the tool output). */
+/**
+ * Upsert a team by its tool-supplied ID.
+ *
+ * "Upsert" here means true upsert: if the row already exists its name and
+ * description are refreshed so replayed team_create events keep metadata
+ * current. execution_status is intentionally set to 'running' (not 'stopped'
+ * as in createTeam) because bridge-created teams come from live Claude Code
+ * sessions — they are active by definition.
+ */
 function upsertTeamById(teamId: string, teamName: string, description: string): void {
-  const existing = getTeamById(teamId);
-  if (existing) return;
   const now = Date.now();
   try {
     db.prepare(
@@ -49,9 +55,16 @@ function upsertTeamById(teamId: string, teamName: string, description: string): 
          (id, name, description, execution_status, execution_policy_id,
           retry_max_attempts, retry_backoff_ms, retry_max_backoff_ms, retry_jitter,
           created_at, updated_at)
-       VALUES (?, ?, ?, 'running', NULL, NULL, NULL, NULL, NULL, ?, ?)`
+       VALUES (?, ?, ?, 'running', NULL, NULL, NULL, NULL, NULL, ?, ?)
+       ON CONFLICT(id) DO UPDATE SET
+         name        = excluded.name,
+         description = excluded.description,
+         updated_at  = excluded.updated_at`
     ).run(teamId, teamName, description, now, now);
-  } catch { /* already exists via race */ }
+  } catch (err: any) {
+    // Re-throw anything that is NOT a unique-constraint race — those are bugs.
+    if (!String(err?.message ?? '').includes('UNIQUE constraint failed')) throw err;
+  }
 }
 
 /** Get or auto-create the "event bridge" team for hook-driven events */
