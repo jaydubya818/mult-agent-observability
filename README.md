@@ -101,6 +101,98 @@ To integrate the observability hooks into your projects:
 
 Now your project will send events to the observability system whenever Claude Code performs actions.
 
+## 🌍 System-Wide Setup (Recommended)
+
+The per-project approach above only captures events when Claude Code is running inside that specific directory. For full observability across **every** Claude Code session — regardless of which project you're working in — set up global hooks and an auto-starting server.
+
+### Global Hooks
+
+Merge the observability hooks into your **global** `~/.claude/settings.json` so all sessions stream to the dashboard. Run this one-time script, replacing the path with wherever you cloned this repo:
+
+```bash
+HOOKS_DIR="$HOME/Multi-Agent-Observability/claude-code-hooks-multi-agent-observability/.claude/hooks"
+UV="/Library/Frameworks/Python.framework/Versions/3.13/bin/uv"  # adjust if needed: $(which uv)
+
+python3 << EOF
+import json
+
+hooks_dir = "$HOOKS_DIR"
+uv = "$UV"
+source_app = "cc-hook-multi-agent-obvs"
+
+def obs_hook(event_type, extra=""):
+    cmd = f"{uv} run {hooks_dir}/send_event.py --source-app {source_app} --event-type {event_type}"
+    if extra: cmd += f" {extra}"
+    return {"type": "command", "command": cmd, "timeout": 5}
+
+obs = {
+    "PreToolUse":         obs_hook("PreToolUse", "--summarize"),
+    "PostToolUse":        obs_hook("PostToolUse", "--summarize"),
+    "Notification":       obs_hook("Notification", "--summarize"),
+    "Stop":               obs_hook("Stop", "--add-chat"),
+    "SubagentStop":       obs_hook("SubagentStop"),
+    "PreCompact":         obs_hook("PreCompact"),
+    "UserPromptSubmit":   obs_hook("UserPromptSubmit", "--summarize"),
+    "SessionStart":       obs_hook("SessionStart"),
+    "SessionEnd":         obs_hook("SessionEnd"),
+    "PermissionRequest":  obs_hook("PermissionRequest", "--summarize"),
+    "PostToolUseFailure": obs_hook("PostToolUseFailure", "--summarize"),
+    "SubagentStart":      obs_hook("SubagentStart"),
+}
+
+cfg_path = f"{__import__('os').path.expanduser('~')}/.claude/settings.json"
+with open(cfg_path) as f: cfg = json.load(f)
+hooks = cfg.setdefault("hooks", {})
+
+for event_type, hook_cmd in obs.items():
+    if event_type not in hooks:
+        hooks[event_type] = [{"matcher": "", "hooks": [hook_cmd]}]
+    else:
+        already = any(
+            h.get("command", "").startswith(f"{uv} run {hooks_dir}/send_event.py")
+            for entry in hooks[event_type]
+            for h in entry.get("hooks", [])
+        )
+        if not already:
+            hooks[event_type].append({"matcher": "", "hooks": [hook_cmd]})
+
+with open(cfg_path, "w") as f: json.dump(cfg, f, indent=2)
+print("Done — observability hooks merged into ~/.claude/settings.json")
+EOF
+```
+
+After running this, every new Claude Code session (in any project) will automatically send events to `http://localhost:4000/events`.
+
+### Auto-Start Server (macOS launchd)
+
+Rather than manually starting the server each time, register it as a launchd agent so it launches at login and restarts automatically if it crashes.
+
+A ready-to-use plist is included at `deploy/com.jaywest.multi-agent-observability.plist`. Install it with:
+
+```bash
+# 1. Copy the plist (edit the paths inside if your username or repo location differs)
+cp deploy/com.jaywest.multi-agent-observability.plist ~/Library/LaunchAgents/
+
+# 2. Load it (starts immediately and on every future login)
+launchctl load ~/Library/LaunchAgents/com.jaywest.multi-agent-observability.plist
+
+# 3. Verify it's running
+launchctl list | grep multi-agent-observability
+# Should show a PID (first column) and exit code 0 (second column)
+
+# 4. Check logs
+tail -f ~/Library/Logs/multi-agent-observability.log
+```
+
+To stop or uninstall:
+```bash
+launchctl unload ~/Library/LaunchAgents/com.jaywest.multi-agent-observability.plist
+```
+
+The plist uses `KeepAlive: true`, so the server restarts automatically on crash. Logs go to `~/Library/Logs/multi-agent-observability.log` and `~/Library/Logs/multi-agent-observability-error.log`.
+
+> **Note**: The `deploy/` plist file uses hardcoded paths for `jaywest`. If your username or repo location differs, edit the `WorkingDirectory`, `ProgramArguments`, `StandardOutPath`, and `StandardErrorPath` keys before loading.
+
 ## 🚀 Quick Start
 
 You can quickly view how this works by running this repository's `.claude` setup.
@@ -204,6 +296,9 @@ claude-code-hooks-multi-agent-observability/
 │   │   └── status_line_v6.py # Context window usage display
 │   │
 │   └── settings.json      # Hook configuration (all 12 events)
+│
+├── deploy/                # Deployment helpers
+│   └── com.jaywest.multi-agent-observability.plist  # macOS launchd agent (auto-start server)
 │
 ├── justfile               # Task runner recipes (just start, just stop, etc.)
 │
