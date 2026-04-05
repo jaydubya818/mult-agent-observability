@@ -54,12 +54,13 @@
               <span class="font-mono text-[var(--theme-text-secondary)]">{{ teamPolicyLine }}</span>
             </p>
             <div
-              v-if="executionKind === 'local_process'"
+              v-if="executionKind === 'local_process' || (snapshot?.execution_policies?.length ?? 0) > 0"
               class="mt-2 max-w-md rounded-md border border-[var(--theme-border-secondary)] bg-[var(--theme-bg-primary)]/40 p-2 space-y-2 text-[10px]"
             >
-              <div class="font-semibold text-[var(--theme-text-secondary)]">Assign execution policy</div>
+              <div class="font-semibold text-[var(--theme-text-secondary)]">Orchestration admin token</div>
               <p class="text-[var(--theme-text-tertiary)] leading-snug">
-                If the server sets <span class="font-mono">ORCH_ADMIN_TOKEN</span>, paste it below (stored in this tab only).
+                Used for audited routes (policy assignment, policy retry save, …) when the server sets
+                <span class="font-mono">ORCH_ADMIN_TOKEN</span>. Stored in this tab only.
               </p>
               <label class="block text-[var(--theme-text-tertiary)]">Admin token</label>
               <input
@@ -69,26 +70,36 @@
                 class="w-full rounded border border-[var(--theme-border-secondary)] bg-[var(--theme-bg-primary)] px-2 py-1 font-mono text-[10px]"
                 placeholder="Optional unless server enforces ORCH_ADMIN_TOKEN"
               />
-              <div class="flex flex-wrap items-center gap-2">
-                <select
-                  v-model="policyAssignSelection"
-                  class="flex-1 min-w-[10rem] rounded border border-[var(--theme-border-secondary)] bg-[var(--theme-bg-primary)] px-2 py-1 text-[10px]"
-                >
-                  <option value="">— Env defaults (clear team policy) —</option>
-                  <option v-for="p in snapshot?.execution_policies ?? []" :key="p.id" :value="p.id">
-                    {{ p.name }}
-                  </option>
-                </select>
-                <button
-                  type="button"
-                  class="rounded-lg px-2 py-1 text-[10px] font-semibold bg-[var(--theme-accent-info)] text-[var(--theme-bg-primary)] disabled:opacity-50"
-                  :disabled="busy"
-                  @click="applyTeamPolicyAssignment"
-                >
-                  Apply
-                </button>
-              </div>
+              <template v-if="executionKind === 'local_process'">
+                <div class="font-semibold text-[var(--theme-text-secondary)] pt-1">Assign execution policy</div>
+                <div class="flex flex-wrap items-center gap-2">
+                  <select
+                    v-model="policyAssignSelection"
+                    class="flex-1 min-w-[10rem] rounded border border-[var(--theme-border-secondary)] bg-[var(--theme-bg-primary)] px-2 py-1 text-[10px]"
+                  >
+                    <option value="">— Env defaults (clear team policy) —</option>
+                    <option v-for="p in snapshot?.execution_policies ?? []" :key="p.id" :value="p.id">
+                      {{ p.name }}
+                    </option>
+                  </select>
+                  <button
+                    type="button"
+                    class="rounded-lg px-2 py-1 text-[10px] font-semibold bg-[var(--theme-accent-info)] text-[var(--theme-bg-primary)] disabled:opacity-50"
+                    :disabled="busy"
+                    @click="applyTeamPolicyAssignment"
+                  >
+                    Apply
+                  </button>
+                </div>
+              </template>
             </div>
+
+            <TeamRetryConfigPanel
+              v-if="activeTeam"
+              :team="activeTeam"
+              :disabled="busy"
+              @apply="saveTeamRetry"
+            />
           </div>
           <div class="flex flex-wrap gap-2">
             <button
@@ -122,6 +133,12 @@
 
         <div class="flex-1 overflow-y-auto p-4 space-y-4">
           <TeamSummaryCards :summary="activeTeamSummary" />
+
+          <PolicyRetryConfigList
+            :policies="snapshot?.execution_policies ?? []"
+            :disabled="busy"
+            @apply="savePolicyRetry"
+          />
 
           <OrchestrationAgentSwimlanes
             :agents="agentsForTeam"
@@ -245,6 +262,8 @@ import AgentReportComposer from './AgentReportComposer.vue';
 import MetricsPanel from './MetricsPanel.vue';
 import OrchestrationEventFeed from './OrchestrationEventFeed.vue';
 import TaskDetailPanel from './TaskDetailPanel.vue';
+import TeamRetryConfigPanel from './TeamRetryConfigPanel.vue';
+import PolicyRetryConfigList from './PolicyRetryConfigList.vue';
 
 const emit = defineEmits<{ snapshot: [OrchestrationSnapshot] }>();
 
@@ -511,6 +530,23 @@ async function applyTeamPolicyAssignment() {
       id,
       orchAdminTokenLocal.value || undefined
     );
+    const snap: OrchestrationSnapshot = await api.fetchSnapshot();
+    emit('snapshot', snap);
+  });
+}
+
+async function saveTeamRetry(patch: Record<string, unknown>) {
+  if (!activeTeam.value) return;
+  await runWithError(async () => {
+    await api.patchTeam(activeTeam.value!.id, patch, orchAdminTokenLocal.value || undefined);
+    const snap: OrchestrationSnapshot = await api.fetchSnapshot();
+    emit('snapshot', snap);
+  });
+}
+
+async function savePolicyRetry(policyId: string, patch: Record<string, unknown>) {
+  await runWithError(async () => {
+    await api.patchExecutionPolicy(policyId, patch, orchAdminTokenLocal.value || undefined);
     const snap: OrchestrationSnapshot = await api.fetchSnapshot();
     emit('snapshot', snap);
   });

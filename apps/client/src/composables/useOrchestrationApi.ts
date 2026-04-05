@@ -174,5 +174,39 @@ export function useOrchestrationApi() {
         })
       );
     },
+
+    /** PATCH team (name/description/policy/retry). Policy field changes require admin token when server enforces it. */
+    async patchTeam(teamId: string, body: Record<string, unknown>, adminToken?: string | null) {
+      const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+      if (adminToken?.trim()) {
+        headers['x-orchestration-admin-token'] = adminToken.trim();
+      }
+      return parse(
+        await fetch(`${root}/teams/${teamId}`, {
+          method: 'PATCH',
+          headers,
+          body: JSON.stringify(body),
+        })
+      );
+    },
+
+    /** PATCH execution policy. Requires admin token when server has `ORCH_ADMIN_TOKEN` set. */
+    async patchExecutionPolicy(
+      policyId: string,
+      body: Record<string, unknown>,
+      adminToken?: string | null
+    ) {
+      const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+      if (adminToken?.trim()) {
+        headers['x-orchestration-admin-token'] = adminToken.trim();
+      }
+      return parse(
+        await fetch(`${root}/policies/${policyId}`, {
+          method: 'PATCH',
+          headers,
+          body: JSON.stringify(body),
+        })
+      );
+    },
   };
 }

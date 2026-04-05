@@ -329,7 +329,14 @@ Not a workflow engine: **no DAG**, no step-level retries, no per-**task** API ov
 | View | Responsibility | State source |
 |------|----------------|--------------|
 | **Observability** | Timeline, filters, pulse chart, swim lanes | `useWebSocket.events` |
-| **Orchestration** | Teams sidebar, agent grid, task columns, messages, metrics, demo/start/stop; collapsible **Recent admin mutations** (read-only `GET /admin-audit`, uses admin token when server requires it); **local_process**: policy summary + **assign policy** UI; task detail highlights **policy_rejected** | `useWebSocket.orchestration` + `useOrchestrationApi` for writes |
+| **Orchestration** | Teams sidebar, agent grid, task columns, messages, metrics, demo/start/stop; collapsible **Recent admin mutations** (read-only `GET /admin-audit`, uses admin token when server requires it); **local_process**: policy summary + **assign policy** UI; task detail highlights **policy_rejected**; **retry admin**: compact **team retry overrides** (PATCH team) showing **effective resolved** config + per-field source breakdown; collapsible **execution policy retry layers** (PATCH policy, admin-gated when `ORCH_ADMIN_TOKEN` is set) | `useWebSocket.orchestration` + `useOrchestrationApi` for writes |
+
+**Operator edit surface (retry):**
+
+- **Team row** (`PATCH /api/orchestration/teams/:id`): optional `retry_*` fields. Empty / “inherit” in the UI sends JSON **`null`** for that field so the next resolution layer applies (policy → env → default per §6.4.2).
+- **Execution policy** (`PATCH /api/orchestration/policies/:id`): same optional `retry_*` fields; requires admin token when the server enforces protected admin routes.
+- **Effective display**: the team panel shows **`team.resolved_retry`** (post-resolution) plus a collapsible **per-field source** line (team / policy / env / default) — same semantics as `ResolvedTaskRetryConfig.resolution` on the server.
+- **Policy list editor** edits **policy columns only**; effective behavior for a running task is always computed with **team beating policy** per field.
 
 All orchestration controls must hit real endpoints and reflect updates via WS snapshot (or explicit refresh emit where GET-only).
 
