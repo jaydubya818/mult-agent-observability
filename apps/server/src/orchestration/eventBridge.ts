@@ -38,18 +38,28 @@ function extractContextWindowPercent(payload: Record<string, any>): number | nul
   return null;
 }
 
+/** Upsert a team by specific ID (preserving the ID from the tool output). */
+function upsertTeamById(teamId: string, teamName: string, description: string): void {
+  const existing = getTeamById(teamId);
+  if (existing) return;
+  const now = Date.now();
+  try {
+    db.prepare(
+      `INSERT INTO orchestration_teams
+         (id, name, description, execution_status, execution_policy_id,
+          retry_max_attempts, retry_backoff_ms, retry_max_backoff_ms, retry_jitter,
+          created_at, updated_at)
+       VALUES (?, ?, ?, 'running', NULL, NULL, NULL, NULL, NULL, ?, ?)`
+    ).run(teamId, teamName, description, now, now);
+  } catch { /* already exists via race */ }
+}
+
 /** Get or auto-create the "event bridge" team for hook-driven events */
 function getOrCreateEventBridgeTeam(teamId: string, teamName: string, sessionId: string): string {
   const existing = getTeamById(teamId);
   if (existing) return existing.id;
-
-  // Note: createTeam generates its own ID, so we pass what we want as the name/description
-  // and then manually insert if we need a specific ID. For now, just create with defaults.
-  const team = createTeam({
-    name: teamName || `Agent Team ${teamId.slice(0, 8)}`,
-    description: `Auto-created from Claude Code session ${sessionId}`,
-  });
-  return team.id;
+  upsertTeamById(teamId, teamName || `Agent Team ${teamId.slice(0, 8)}`, `Auto-created from Claude Code session ${sessionId}`);
+  return teamId;
 }
 
 /** Get or auto-create an agent record for a Claude Code session */
@@ -139,18 +149,16 @@ function processAgentTeamTool(
       // output typically: { team_id: "...", name: "...", ... }
       const teamId = (output.team_id ?? output.id ?? input.team_id ?? input.id) as string | undefined;
       const teamName = (output.name ?? input.name ?? `Team`) as string;
+      const teamDesc = (input.description ?? output.description ?? `Created by session ${sessionId}`) as string;
 
-      // If we have a specific team ID from output, try to get it; otherwise create new
       let actualTeamId: string;
-      const existing = teamId ? getTeamById(teamId) : null;
-      if (existing) {
-        actualTeamId = existing.id;
+      if (teamId) {
+        // Preserve the exact ID from the tool response so downstream events can link to it
+        upsertTeamById(teamId, teamName, teamDesc);
+        actualTeamId = teamId;
       } else {
-        // createTeam generates its own ID
-        const newTeam = createTeam({
-          name: teamName,
-          description: (input.description ?? output.description ?? `Created by session ${sessionId}`) as string,
-        });
+        // No ID provided — let createTeam generate one
+        const newTeam = createTeam({ name: teamName, description: teamDesc });
         actualTeamId = newTeam.id;
       }
 
