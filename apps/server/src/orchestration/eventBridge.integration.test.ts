@@ -108,7 +108,8 @@ describe('eventBridge – team_create', () => {
     const snap = getOrchestrationSnapshot();
     expect(snap.teams).toHaveLength(1);
     // id should be a v4 UUID, not empty
-    expect(snap.teams[0].id).toMatch(/^[0-9a-f-]{36}$/);
+    // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
+    expect(snap.teams[0]!.id).toMatch(/^[0-9a-f-]{36}$/);
   });
 
   test('registers the calling session as orchestrator agent', () => {
@@ -127,8 +128,10 @@ describe('eventBridge – team_create', () => {
     const snap = getOrchestrationSnapshot();
     const agents = snap.agents.filter(a => a.team_id === TEAM_ID);
     expect(agents).toHaveLength(1);
-    expect(agents[0].role).toBe('orchestrator');
-    expect(agents[0].model_name).toBe('claude-opus-4-6');
+    // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
+    expect(agents[0]!.role).toBe('orchestrator');
+    // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
+    expect(agents[0]!.model_name).toBe('claude-opus-4-6');
   });
 });
 
@@ -181,8 +184,10 @@ describe('eventBridge – team_create → task_create FK chain (regression)', ()
     const snap = getOrchestrationSnapshot();
     const msgs = snap.messages.filter(m => m.team_id === TEAM_ID);
     expect(msgs).toHaveLength(1);
-    expect(msgs[0].body).toBe('All systems nominal');
-    expect(msgs[0].kind).toBe('report');
+    // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
+    expect(msgs[0]!.body).toBe('All systems nominal');
+    // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
+    expect(msgs[0]!.kind).toBe('report');
   });
 
   test('full chain: team_create → task_create × 2 → send_message → snapshot coherent', () => {
