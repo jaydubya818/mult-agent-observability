@@ -71,7 +71,8 @@ def main():
         input_data = json.load(sys.stdin)
     except json.JSONDecodeError as e:
         print(f"Failed to parse JSON input: {e}", file=sys.stderr)
-        sys.exit(1)
+        # Continue with empty payload rather than blocking Claude Code
+        input_data = {}
     
     # Extract model name from transcript (with caching)
     session_id = input_data.get('session_id', 'unknown')
@@ -142,7 +143,25 @@ def main():
     # reason: SessionEnd
     if 'reason' in input_data:
         event_data['reason'] = input_data['reason']
-    
+
+    # context_window_percent: Extract from usage data if available
+    if 'usage' in input_data and isinstance(input_data['usage'], dict):
+        if 'context_window_percent' in input_data['usage']:
+            event_data['context_window_percent'] = input_data['usage']['context_window_percent']
+
+    # Agent Team Tools Detection
+    # Mark events that involve Claude Code's experimental agent team tools
+    AGENT_TEAM_TOOLS = {
+        'team_create', 'team_delete',
+        'task_create', 'task_list', 'task_get', 'task_update',
+        'send_message',
+    }
+
+    tool_name = input_data.get('tool_name') or input_data.get('name', '')
+    if tool_name and tool_name in AGENT_TEAM_TOOLS:
+        event_data['_agent_team_tool'] = True
+        event_data['_tool_category'] = 'agent_team'
+
     # Handle --add-chat option
     if args.add_chat and 'transcript_path' in input_data:
         transcript_path = input_data['transcript_path']

@@ -98,6 +98,11 @@ export interface Agent {
   metadata: Record<string, unknown>;
   created_at: number;
   updated_at: number;
+  // New fields for Claude Code event bridge
+  model_name?: string | null;
+  context_window_percent?: number | null;
+  source_session_id?: string | null;
+  last_seen_at?: number | null;
 }
 
 /** Retry bookkeeping persisted on the task row (engine-owned; not part of user payload). */
@@ -201,6 +206,19 @@ export interface TaskRunHistoryRecord extends TaskRunRecord {
   recorded_at: number;
 }
 
+export interface SandboxRecord {
+  id: string;
+  provider: string;
+  template_id: string | null;
+  session_id: string | null;
+  team_id: string | null;
+  status: 'running' | 'stopped' | 'error';
+  url: string | null;
+  metadata: Record<string, unknown>;
+  created_at: number;
+  updated_at: number;
+}
+
 export interface OrchestrationSnapshot {
   teams: Team[];
   team_summaries: TeamSummary[];
@@ -214,6 +232,8 @@ export interface OrchestrationSnapshot {
   execution_policies: ExecutionPolicy[];
   /** Active server execution adapter (`simulated` | `local_process`, …). */
   execution_environment_kind: string;
+  /** Sandbox records (E2B or other providers) */
+  sandboxes: SandboxRecord[];
 }
 
 /** Orchestration admin / config mutation audit (no secrets or raw tokens). */

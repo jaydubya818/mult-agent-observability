@@ -79,6 +79,10 @@ export interface OrchestrationAgent {
   environment_kind: string;
   current_task_id?: string;
   metadata: Record<string, unknown>;
+  model_name?: string | null;
+  context_window_percent?: number | null;
+  source_session_id?: string | null;
+  last_seen_at?: number | null;
   created_at: number;
   updated_at: number;
 }
@@ -180,6 +184,19 @@ export interface TaskRunHistoryRecord extends TaskRunRecord {
   recorded_at: number;
 }
 
+export interface SandboxRecord {
+  id: string;
+  provider: string;
+  template_id: string | null;
+  session_id: string | null;
+  team_id: string | null;
+  status: 'running' | 'stopped' | 'error';
+  url: string | null;
+  metadata: Record<string, unknown>;
+  created_at: number;
+  updated_at: number;
+}
+
 /** Admin mutation audit (server; no secrets in rows). */
 export interface AdminAuditRecord {
   id: string;
@@ -195,6 +212,26 @@ export interface AdminAuditRecord {
   metadata: Record<string, unknown>;
 }
 
+/** GET /admin/retention-config — effective limits + env provenance (read-only). */
+export interface RetentionLimitSourceDims {
+  max_days: string | null;
+  max_rows: string | null;
+}
+
+export interface RetentionConfigSection {
+  max_days: number | null;
+  max_rows: number | null;
+  limit_source: RetentionLimitSourceDims;
+  notes: string[];
+}
+
+export interface RetentionConfigPayload {
+  read_only: true;
+  admin_audit: RetentionConfigSection;
+  task_runs: RetentionConfigSection;
+  task_run_history: RetentionConfigSection;
+}
+
 export interface OrchestrationSnapshot {
   teams: OrchestrationTeam[];
   team_summaries: TeamSummary[];
@@ -205,5 +242,6 @@ export interface OrchestrationSnapshot {
   task_transitions: TaskTransition[];
   task_runs: TaskRunRecord[];
   execution_policies: ExecutionPolicy[];
+  sandboxes?: SandboxRecord[];
   execution_environment_kind: string;
 }

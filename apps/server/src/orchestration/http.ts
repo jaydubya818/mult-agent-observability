@@ -15,6 +15,7 @@ import {
   getEffectiveLocalProcessPolicyForTeam,
   getExecutionPolicyById,
   getOrchestrationSnapshot,
+  getSandboxById,
   getTaskById,
   getTeamById,
   getTeamSummaries,
@@ -24,6 +25,7 @@ import {
   listExecutionPolicies,
   listMessages,
   listMetrics,
+  listSandboxes,
   listTaskRunHistory,
   listTasksByTeam,
   listTeams,
@@ -34,7 +36,7 @@ import {
   updateTeam,
   type TaskRunHistoryQuery,
 } from './repository';
-import { runOrchestrationRetentionPrune } from './retention';
+import { getOrchestrationRetentionConfigView, runOrchestrationRetentionPrune } from './retention';
 import type { MessageDirection, MessageKind, RetryJitterMode, TaskRunStatus, TaskStatus } from './types';
 
 function parseRetryConfigFields(body: Record<string, unknown>): Partial<{
@@ -283,6 +285,13 @@ export async function handleOrchestrationRequest(
       return json({ records }, 200, h);
     }
 
+    // GET /api/orchestration/admin/retention-config
+    if (req.method === 'GET' && parts[2] === 'admin' && parts[3] === 'retention-config' && parts.length === 4) {
+      const denied = requireOrchestrationAdmin(req, corsHeaders);
+      if (denied) return denied;
+      return json({ retention: getOrchestrationRetentionConfigView() }, 200, h);
+    }
+
     // POST /api/orchestration/admin/prune-history
     if (req.method === 'POST' && parts[2] === 'admin' && parts[3] === 'prune-history' && parts.length === 4) {
       const denied = gateOrchestrationAdminWithAudit(req, url, corsHeaders, { action: 'retention_prune' });
@@ -296,6 +305,8 @@ export async function handleOrchestrationRequest(
           task_runs_removed: summary.task_runs.removed_by_age + summary.task_runs.removed_by_row_cap,
           task_run_history_removed:
             summary.task_run_history.removed_by_age + summary.task_run_history.removed_by_row_cap,
+          task_run_history_limit_source: summary.task_run_history.limit_source,
+          task_run_history_config: summary.task_run_history.config,
         },
       });
       return json({ ok: true, summary }, 200, h);
@@ -764,6 +775,25 @@ export async function handleOrchestrationRequest(
       const ok = engine.cancelTask(cancelId);
       if (!ok) return json({ error: 'task is not running or has no active workload' }, 409, h);
       return new Response(JSON.stringify({ ok: true, task_id: cancelId }), { headers: h });
+    }
+
+    // GET /api/orchestration/sandboxes
+    if (req.method === 'GET' && parts[2] === 'sandboxes' && parts.length === 3) {
+      const statusFilter = url.searchParams.get('status') ?? undefined;
+      const sessionFilter = url.searchParams.get('session_id') ?? undefined;
+      const sandboxes = listSandboxes({ status: statusFilter ?? undefined, session_id: sessionFilter ?? undefined });
+      return new Response(JSON.stringify(sandboxes), {
+        headers: { ...h, 'Content-Type': 'application/json' },
+      });
+    }
+
+    // GET /api/orchestration/sandboxes/:id
+    if (req.method === 'GET' && parts[2] === 'sandboxes' && parts.length === 4) {
+      const id = parts[3];
+      if (!id) return json({ error: 'id required' }, 400, h);
+      const sandbox = getSandboxById(id);
+      if (!sandbox) return json({ error: 'not found' }, 404, h);
+      return new Response(JSON.stringify(sandbox), { headers: { ...h, 'Content-Type': 'application/json' } });
     }
 
     return null;

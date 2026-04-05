@@ -24,6 +24,25 @@
       <p v-else class="mt-2 text-[var(--theme-text-tertiary)]">No rows loaded.</p>
     </details>
 
+    <details
+      class="px-4 py-2 border-b border-[var(--theme-border-primary)] bg-[var(--theme-bg-secondary)]/60 text-[10px]"
+      @toggle="onRetentionConfigToggle"
+    >
+      <summary class="cursor-pointer font-semibold text-[var(--theme-text-secondary)] select-none">
+        Effective retention (read-only)
+      </summary>
+      <p class="text-[var(--theme-text-tertiary)] mt-2 leading-snug">
+        Introspection only — does not run prune. Uses the same admin token as the audit log when
+        <span class="font-mono">ORCH_ADMIN_TOKEN</span> is set.
+      </p>
+      <p v-if="retentionConfigLoading" class="mt-2 text-[var(--theme-text-tertiary)]">Loading…</p>
+      <pre
+        v-else-if="retentionConfigJson"
+        class="mt-2 max-h-40 overflow-auto rounded border border-[var(--theme-border-tertiary)] bg-[var(--theme-bg-primary)]/50 p-2 text-[var(--theme-text-secondary)] whitespace-pre-wrap break-words"
+        >{{ retentionConfigJson }}</pre>
+      <p v-else class="mt-2 text-[var(--theme-text-tertiary)]">Open to load.</p>
+    </details>
+
     <TaskRunHistorySection
       ref="runHistorySectionRef"
       :teams="snapshot?.teams ?? []"
@@ -144,6 +163,11 @@
         <div class="flex-1 overflow-y-auto p-4 space-y-4">
           <TeamSummaryCards :summary="activeTeamSummary" />
 
+          <SandboxDashboard
+            :sandboxes="sandboxes"
+            @refresh="refreshSandboxes"
+          />
+
           <PolicyRetryConfigList
             :policies="snapshot?.execution_policies ?? []"
             :disabled="busy"
@@ -164,6 +188,12 @@
             —
             <button type="button" class="text-[var(--theme-accent-info)] underline" @click="clearAgentFilter">Clear</button>
           </p>
+
+          <ParallelActivityChart
+            :agents="agentsForTeam"
+            :tasks="tasksForTeam"
+            :window-minutes="10"
+          />
 
           <div class="grid xl:grid-cols-3 gap-4">
             <div class="xl:col-span-2 space-y-3">
@@ -188,6 +218,10 @@
                 v-model:agent-id="agentReportAgentId"
                 :disabled="busy"
                 @send="sendAgentReport"
+              />
+              <AgentCommunicationTimeline
+                :messages="messagesForTeam"
+                :agents="agentsForTeam"
               />
               <MessageThread
                 title="Orchestrator → agents"
@@ -262,6 +296,8 @@ import type {
   AgentStatus,
   OrchestrationSnapshot,
   OrchestrationTask,
+  RetentionConfigPayload,
+  SandboxRecord,
   TaskStatus,
 } from '../../orchestrationTypes';
 import { useOrchestrationApi } from '../../composables/useOrchestrationApi';
@@ -278,6 +314,9 @@ import TaskDetailPanel from './TaskDetailPanel.vue';
 import TeamRetryConfigPanel from './TeamRetryConfigPanel.vue';
 import PolicyRetryConfigList from './PolicyRetryConfigList.vue';
 import TaskRunHistorySection from './TaskRunHistorySection.vue';
+import SandboxDashboard from './SandboxDashboard.vue';
+import ParallelActivityChart from './ParallelActivityChart.vue';
+import AgentCommunicationTimeline from './AgentCommunicationTimeline.vue';
 
 const emit = defineEmits<{ snapshot: [OrchestrationSnapshot] }>();
 
@@ -314,6 +353,12 @@ const orchAdminTokenLocal = ref('');
 const policyAssignSelection = ref('');
 const adminAuditRows = ref<AdminAuditRecord[]>([]);
 const adminAuditLoading = ref(false);
+const retentionConfig = ref<RetentionConfigPayload | null>(null);
+const retentionConfigLoading = ref(false);
+const sandboxes = ref<SandboxRecord[]>([]);
+const retentionConfigJson = computed(() =>
+  retentionConfig.value ? JSON.stringify(retentionConfig.value, null, 2) : ''
+);
 
 /** Epoch ms after successful team retry PATCH; 0 = hide inline "Saved" hint. */
 const teamRetrySaveAckAt = ref(0);
@@ -527,6 +572,22 @@ async function onAdminAuditToggle(ev: Event) {
   }
 }
 
+async function onRetentionConfigToggle(ev: Event) {
+  const el = ev.target as HTMLDetailsElement;
+  if (!el.open) return;
+  retentionConfigLoading.value = true;
+  orchError.value = null;
+  try {
+    const { retention } = await api.getRetentionConfig(orchAdminTokenLocal.value || undefined);
+    retentionConfig.value = retention;
+  } catch (e) {
+    orchError.value = e instanceof Error ? e.message : String(e);
+    retentionConfig.value = null;
+  } finally {
+    retentionConfigLoading.value = false;
+  }
+}
+
 function formatAuditTime(ts: number): string {
   try {
     return new Date(ts).toLocaleString();
@@ -698,5 +759,13 @@ async function sendOrchestratorMessage() {
     }
     orchMessage.value = '';
   });
+}
+
+async function refreshSandboxes() {
+  try {
+    sandboxes.value = await api.fetchSandboxes();
+  } catch {
+    // Silent fail for sandbox fetching
+  }
 }
 </script>

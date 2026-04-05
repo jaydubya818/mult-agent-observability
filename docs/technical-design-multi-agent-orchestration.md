@@ -117,7 +117,7 @@ See PRD functional requirements; physical mapping:
 - `orchestration_metrics` — key/value/unit/time series
 - `orchestration_execution_policies` — persisted guardrails per `adapter_kind` (MVP: `local_process`): `cmd_allowlist`, `cmd_denylist`, `max_ms`, `max_concurrent`, `cwd_allowlist`, `env_allowlist`, `max_output_bytes`, timestamps
 - `orchestration_task_runs` — **one row per `task_id`** (upserted on each execution); holds the **live / latest** run correlation (`run_id`, stream tails, termination, etc.) including **stub rows** for pre-start failures (see §11). This is the source for `OrchestrationSnapshot.task_runs` and the task detail “current run” panel.
-- `orchestration_task_run_history` — **append-only archive of terminal runs** (one row per unique `run_id`). Each call to `finalizeTaskRun` (terminal status) or `recordPreStartRejectedRun` snapshots the current run row into history via `INSERT OR REPLACE` on `run_id`, so **retries produce multiple history rows per task**. In-flight executions are **not** listed here until they finish. Pruning uses the **same** env caps as task runs (§6.3). Deleting a task cascades history rows.
+- `orchestration_task_run_history` — **append-only archive of terminal runs** (one row per unique `run_id`). Each call to `finalizeTaskRun` (terminal status) or `recordPreStartRejectedRun` snapshots the current run row into history via `INSERT OR REPLACE` on `run_id`, so **retries produce multiple history rows per task**. In-flight executions are **not** listed here until they finish. **Retention is separate from live `task_runs`** (§6.3): optional `ORCH_TASK_RUN_HISTORY_*` overrides; otherwise each limit dimension falls back to the matching `ORCH_TASK_RUNS_*` value. Deleting a task cascades history rows.
 
 Cascade: delete team removes children (FK `ON DELETE CASCADE`). Deleting a policy sets team `execution_policy_id` to null (`ON DELETE SET NULL`).
 
@@ -169,6 +169,7 @@ Base: `/api/orchestration`
 | PUT | `/teams/:id/execution-policy` | Assign policy id to team (`{"execution_policy_id": "…"}` or null) |
 | GET | `/teams/:id/effective-execution-policy` | Resolved `local_process` policy for team (source: `team_policy` \| `env_defaults`) |
 | GET | `/admin-audit` | Read-only admin mutation audit log (query filters below; see §6.2) |
+| GET | `/admin/retention-config` | Read-only effective retention limits + env provenance (§6.3); **does not run prune** |
 | POST | `/admin/prune-history` | Run retention prune using env limits; returns summary JSON (§6.3); audited as `retention_prune` |
 
 ### 6.1 Thin admin token (`ORCH_ADMIN_TOKEN`)
@@ -198,10 +199,13 @@ This is a **shared-secret gate** for sensitive orchestration mutations—not ide
 | PATCH | `/teams/:id` | Only if body contains key `execution_policy_id` |
 | POST | `/teams` | Only if body contains key `execution_policy_id` |
 | POST | `/admin/prune-history` | Apply configured retention (same token as other admin mutations) |
+| GET | `/admin/retention-config` | Read-only retention introspection (same token model as `GET /admin-audit` when protected) |
 
 **Still open (read + most operator actions):** `GET` snapshot, **`GET` task-runs / task run history**, teams, policies, effective policy, PATCH team **without** `execution_policy_id`, task/agent CRUD, execution start/stop, etc.
 
 **`GET /admin-audit` auth:** When `ORCH_ADMIN_TOKEN` is **set**, the same token is required to list audit rows. In **open mode**, `GET /admin-audit` is readable without a token (local trust boundary only).
+
+**`GET /admin/retention-config` auth:** Identical to **`GET /admin-audit`** — when `ORCH_ADMIN_TOKEN` is set, send the same headers; in open mode, no token is required. The response **never** triggers pruning; it only reflects `process.env` and the same resolution rules as **`POST /admin/prune-history`**.
 
 **`POST /admin/prune-history` auth:** Same as other protected mutations when `ORCH_ADMIN_TOKEN` is set; in open mode, any client may invoke it (still a sharp tool—restrict at the network layer in production).
 
@@ -264,20 +268,37 @@ Persisted **accountability** trail for orchestration **admin/config** mutations.
 
 Env-configured retention prevents audit and task-run tables from growing without bound. **No cron subsystem**—prune runs **once at server startup** (after migrations) and can be run again via **`POST /api/orchestration/admin/prune-history`**.
 
-| Variable | Table | Effect |
+That endpoint runs **one combined pass**: admin audit log, **live** `orchestration_task_runs`, and **archived** `orchestration_task_run_history`, each with its own effective limits. Nothing else is deleted (tasks, agents, teams, policies, messages, etc.).
+
+| Variable | Scope | Effect |
 |----------|--------|--------|
 | `ORCH_ADMIN_AUDIT_MAX_DAYS` | `orchestration_admin_audit_log` | Delete rows with `created_at` older than N days (omit or ≤0: disabled). |
 | `ORCH_ADMIN_AUDIT_MAX_ROWS` | `orchestration_admin_audit_log` | After age step, keep at most **N** rows by deleting **oldest** `created_at` first (omit or ≤0: disabled). |
-| `ORCH_TASK_RUNS_MAX_DAYS` | `orchestration_task_runs` **and** `orchestration_task_run_history` | Delete **prunable** rows with `finished_at` older than N days (each table pruned independently with the same cutoff). |
-| `ORCH_TASK_RUNS_MAX_ROWS` | `orchestration_task_runs` **and** `orchestration_task_run_history` | After age step, cap **prunable** rows **per table**—drop oldest by `finished_at` until count ≤ N. |
+| `ORCH_TASK_RUNS_MAX_DAYS` | **`orchestration_task_runs` only** (live row per task) | Delete **prunable** rows with `finished_at` older than N days. |
+| `ORCH_TASK_RUNS_MAX_ROWS` | **`orchestration_task_runs` only** | After age step for this table, cap **prunable** rows—drop oldest by `finished_at` until count ≤ N. |
+| `ORCH_TASK_RUN_HISTORY_MAX_DAYS` | **`orchestration_task_run_history` only** | Same age rule as live runs, but **only** for history rows. If unset, **max-days for history** falls back to `ORCH_TASK_RUNS_MAX_DAYS` (so existing deployments keep the same behavior until they set history-specific vars). |
+| `ORCH_TASK_RUN_HISTORY_MAX_ROWS` | **`orchestration_task_run_history` only** | Same row-cap rule as live runs, but **only** for history. If unset, **max-rows for history** falls back to `ORCH_TASK_RUNS_MAX_ROWS`. |
 
-**Precedence when both age and row cap are set (each table):** **age-based deletion runs first**, then **row-cap** trims excess among remaining rows.
+**Per-field fallback (history):** `max_days` and `max_rows` are resolved **independently**. Example: `ORCH_TASK_RUN_HISTORY_MAX_ROWS=500` with no `ORCH_TASK_RUN_HISTORY_MAX_DAYS` uses **500** for history row cap and still uses `ORCH_TASK_RUNS_MAX_DAYS` for history age if that is set, or no age limit if neither history nor live max-days is set.
 
-**Prunable rows (each of `orchestration_task_runs` and `orchestration_task_run_history`):** `status IN ('completed','failed','cancelled','timed_out','policy_rejected')` **and** `finished_at IS NOT NULL`. Rows in **`pending`** or **`running`** are never deleted by retention (in practice, history rows are always terminal).
+**Precedence when both age and row cap apply to the same table:** **age-based deletion runs first**, then **row-cap** trims excess among remaining prunable rows (oldest `finished_at` first). This applies separately to live runs vs history (each table runs age step, then its own row-cap step).
 
-**What is preserved:** All non-prunable live task runs; audit rows inside configured windows; tasks/agents/teams/policies are untouched. **Historical** terminal runs older than limits are removed from `orchestration_task_run_history` as well—`GET /task-runs` will eventually stop returning them.
+**Prunable rows (live and history):** `status IN ('completed','failed','cancelled','timed_out','policy_rejected')` **and** `finished_at IS NOT NULL`. Live rows in **`pending`** or **`running`** are never deleted by retention (history rows are terminal by design).
 
-**Observability:** If any row was deleted, the server emits **one structured `console.log` line** to stdout: `[orchestration:retention]` plus JSON summary (`removed_by_*` per table, `task_run_history` included, config echo). The hook **event** stream is not used (avoids noise). Manual `POST /admin/prune-history` also appends an admin-audit **`retention_prune`** success row with aggregate counts (`task_run_history_removed` in metadata).
+**What is deleted where:**
+
+- **`POST /admin/prune-history`** / startup prune: only rows in `orchestration_admin_audit_log`, `orchestration_task_runs`, and `orchestration_task_run_history` that match the rules above. **Live** pruning does not remove history rows; **history** pruning does not remove live `task_runs` rows.
+- **What is preserved:** Non-prunable live runs, audit rows inside configured windows, and all non–task-run entities.
+
+**Observability:** If any row was deleted, the server emits **one structured `console.log` line** to stdout: `[orchestration:retention]` plus JSON summary (`removed_by_*` per table; `task_run_history` includes `config` and `limit_source` naming which env tier supplied each dimension). The hook **event** stream is not used (avoids noise). Manual `POST /admin/prune-history` appends an admin-audit **`retention_prune`** success row with aggregate counts plus `task_run_history_limit_source` and `task_run_history_config` in `metadata`. The response body includes the full `summary` object.
+
+**`GET /admin/retention-config` (introspection):** Returns JSON `{ "retention": { "read_only": true, "admin_audit": {…}, "task_runs": {…}, "task_run_history": {…} } }`. Each section includes:
+
+- `max_days` / `max_rows` — effective numeric limits or **`null`** if that dimension is off (after applying history → live **per-field** fallback where applicable).
+- `limit_source` — for each dimension, the **env var name** that supplies the effective limit, or **`null`** if unset (e.g. `task_run_history.limit_source.max_rows` may be `ORCH_TASK_RUN_HISTORY_MAX_ROWS`, `ORCH_TASK_RUNS_MAX_ROWS`, or `null`).
+- `notes` — short operator hints (unset dimensions, history fallback lines when `ORCH_TASK_RUN_HISTORY_*` is omitted but `ORCH_TASK_RUNS_*` applies).
+
+This route **does not** delete rows, write audit entries, or call the DB for retention. It reads **`process.env`** only.
 
 **Limitations:** Startup prune runs before traffic—brief extra work on boot. No per-tenant retention. Row caps are **global** per table (not per team). Trimming **deletes** data outright—**`GET /task-runs` is not an immutable audit trail**; for strict long-term retention, export the DB or ship logs separately.
 
@@ -359,7 +380,7 @@ Not a workflow engine: **no DAG**, no step-level retries, no per-**task** API ov
 | View | Responsibility | State source |
 |------|----------------|--------------|
 | **Observability** | Timeline, filters, pulse chart, swim lanes | `useWebSocket.events` |
-| **Orchestration** | Teams sidebar, agent grid, task columns, messages, metrics, demo/start/stop; collapsible **Recent admin mutations** (read-only `GET /admin-audit`, uses admin token when server requires it); **local_process**: policy summary + **assign policy** UI; task detail highlights **policy_rejected**; **retry admin**: compact **team retry overrides** (PATCH team) showing **effective resolved** config + per-field source breakdown; collapsible **execution policy retry layers** (PATCH policy, admin-gated when `ORCH_ADMIN_TOKEN` is set) | `useWebSocket.orchestration` + `useOrchestrationApi` for writes |
+| **Orchestration** | Teams sidebar, agent grid, task columns, messages, metrics, demo/start/stop; collapsible **Recent admin mutations** (read-only `GET /admin-audit`, uses admin token when server requires it); collapsible **Effective retention (read-only)** (`GET /admin/retention-config`, same token semantics; does not run prune); **local_process**: policy summary + **assign policy** UI; task detail highlights **policy_rejected**; **retry admin**: compact **team retry overrides** (PATCH team) showing **effective resolved** config + per-field source breakdown; collapsible **execution policy retry layers** (PATCH policy, admin-gated when `ORCH_ADMIN_TOKEN` is set) | `useWebSocket.orchestration` + `useOrchestrationApi` for writes |
 
 **Operator edit surface (retry):**
 

@@ -1,16 +1,17 @@
 import { initDatabase, insertEvent, getFilterOptions, getRecentEvents, updateEventHITLResponse } from './db';
 import type { HookEvent, HumanInTheLoopResponse } from './types';
-import { 
-  createTheme, 
-  updateThemeById, 
-  getThemeById, 
-  searchThemes, 
-  deleteThemeById, 
-  exportThemeById, 
+import {
+  createTheme,
+  updateThemeById,
+  getThemeById,
+  searchThemes,
+  deleteThemeById,
+  exportThemeById,
   importTheme,
-  getThemeStats 
+  getThemeStats
 } from './theme';
 import { bootstrapOrchestration } from './orchestration/bootstrap';
+import { processHookEventForOrchestration } from './orchestration/eventBridge';
 
 // Startup environment checks
 if (!process.env.ANTHROPIC_API_KEY) {
@@ -153,7 +154,13 @@ const server = Bun.serve({
         
         // Insert event into database
         const savedEvent = insertEvent(event);
-        
+
+        // Process for orchestration state mutation
+        const orchMutated = processHookEventForOrchestration(savedEvent);
+        if (orchMutated) {
+          orchestration.broadcastOrchestrationState();
+        }
+
         // Broadcast to all WebSocket clients
         const message = JSON.stringify({ type: 'event', data: savedEvent });
         wsClients.forEach(client => {

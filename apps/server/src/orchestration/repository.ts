@@ -198,6 +198,31 @@ export function initOrchestrationSchema(): void {
     CREATE INDEX IF NOT EXISTS idx_orch_admin_audit_action ON orchestration_admin_audit_log(action);
     CREATE INDEX IF NOT EXISTS idx_orch_admin_audit_outcome ON orchestration_admin_audit_log(outcome);
   `);
+  // Add new columns to orchestration_agents for model/context tracking
+  // These use try/catch because ALTER TABLE doesn't support IF NOT EXISTS
+  try { db.exec(`ALTER TABLE orchestration_agents ADD COLUMN model_name TEXT`); } catch {}
+  try { db.exec(`ALTER TABLE orchestration_agents ADD COLUMN context_window_percent REAL`); } catch {}
+  try { db.exec(`ALTER TABLE orchestration_agents ADD COLUMN source_session_id TEXT`); } catch {}
+  try { db.exec(`ALTER TABLE orchestration_agents ADD COLUMN last_seen_at INTEGER`); } catch {}
+
+  // Add new table for E2B sandboxes
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS agent_sandboxes (
+      id TEXT PRIMARY KEY,
+      provider TEXT NOT NULL DEFAULT 'e2b',
+      template_id TEXT,
+      session_id TEXT,
+      team_id TEXT,
+      status TEXT NOT NULL DEFAULT 'running',
+      url TEXT,
+      metadata TEXT NOT NULL DEFAULT '{}',
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_sandboxes_session ON agent_sandboxes(session_id);
+    CREATE INDEX IF NOT EXISTS idx_sandboxes_status ON agent_sandboxes(status);
+  `);
+
   migrateOrchestrationTaskRunsColumns();
   migrateOrchestrationTeamsPolicyColumn();
   migrateOrchestrationRetryColumns();
@@ -1015,6 +1040,10 @@ function rowToAgent(row: any): Agent {
     metadata: parseJson(row.metadata, {}),
     created_at: row.created_at,
     updated_at: row.updated_at,
+    model_name: row.model_name ?? null,
+    context_window_percent: row.context_window_percent ?? null,
+    source_session_id: row.source_session_id ?? null,
+    last_seen_at: row.last_seen_at ?? null,
   };
 }
 
@@ -1423,7 +1452,8 @@ export function pruneOrchestrationAdminAudit(maxDays?: number, maxRows?: number)
 }
 
 /**
- * Prune completed task run rows (`orchestration_task_runs` is one row per task_id; see technical design).
+ * Prune **live/current** task run rows in `orchestration_task_runs` (one row per `task_id`).
+ * Policies: `ORCH_TASK_RUNS_MAX_DAYS`, `ORCH_TASK_RUNS_MAX_ROWS` (see technical design §6.3).
  * Only terminal rows with non-null `finished_at` are eligible. **Never** deletes `pending` / `running`.
  * Precedence when both limits set: **age first**, then global row cap on prunable rows (oldest `finished_at` first).
  */
@@ -1473,8 +1503,10 @@ export function pruneOrchestrationTaskRuns(maxDays?: number, maxRows?: number): 
 }
 
 /**
- * Prune archived task run history (`orchestration_task_run_history`). Same eligibility and precedence
- * as `pruneOrchestrationTaskRuns` (terminal `finished_at` only; age first, then global cap).
+ * Prune **archived** terminal runs in `orchestration_task_run_history`.
+ * Effective limits: `ORCH_TASK_RUN_HISTORY_MAX_DAYS` / `ORCH_TASK_RUN_HISTORY_MAX_ROWS`, with **per-field**
+ * fallback to `ORCH_TASK_RUNS_MAX_DAYS` / `ORCH_TASK_RUNS_MAX_ROWS` when a history-specific value is omitted.
+ * Same eligibility and precedence as `pruneOrchestrationTaskRuns` (terminal + `finished_at`; age first, then cap).
  */
 export function pruneOrchestrationTaskRunHistory(maxDays?: number, maxRows?: number): {
   removed_by_age: number;
@@ -1521,6 +1553,99 @@ export function pruneOrchestrationTaskRunHistory(maxDays?: number, maxRows?: num
   return { removed_by_age, removed_by_row_cap };
 }
 
+// Sandbox record interface and functions
+export interface SandboxRecord {
+  id: string;
+  provider: string;
+  template_id: string | null;
+  session_id: string | null;
+  team_id: string | null;
+  status: 'running' | 'stopped' | 'error';
+  url: string | null;
+  metadata: Record<string, unknown>;
+  created_at: number;
+  updated_at: number;
+}
+
+function rowToSandbox(row: any): SandboxRecord {
+  return {
+    id: row.id,
+    provider: row.provider,
+    template_id: row.template_id ?? null,
+    session_id: row.session_id ?? null,
+    team_id: row.team_id ?? null,
+    status: row.status,
+    url: row.url ?? null,
+    metadata: row.metadata ? JSON.parse(row.metadata) : {},
+    created_at: row.created_at,
+    updated_at: row.updated_at,
+  };
+}
+
+export function upsertSandbox(data: {
+  id: string;
+  provider?: string;
+  template_id?: string | null;
+  session_id?: string | null;
+  team_id?: string | null;
+  status?: 'running' | 'stopped' | 'error';
+  url?: string | null;
+  metadata?: Record<string, unknown>;
+}): SandboxRecord {
+  const now = Date.now();
+  const existing = db.prepare('SELECT * FROM agent_sandboxes WHERE id = ?').get(data.id) as any;
+  if (existing) {
+    db.prepare(`UPDATE agent_sandboxes SET provider=?, template_id=?, session_id=?, team_id=?, status=?, url=?, metadata=?, updated_at=? WHERE id=?`).run(
+      data.provider ?? existing.provider,
+      data.template_id !== undefined ? data.template_id : existing.template_id,
+      data.session_id !== undefined ? data.session_id : existing.session_id,
+      data.team_id !== undefined ? data.team_id : existing.team_id,
+      data.status ?? existing.status,
+      data.url !== undefined ? data.url : existing.url,
+      JSON.stringify(data.metadata ?? JSON.parse(existing.metadata ?? '{}')),
+      now,
+      data.id,
+    );
+  } else {
+    db.prepare(`INSERT INTO agent_sandboxes (id, provider, template_id, session_id, team_id, status, url, metadata, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?)`).run(
+      data.id, data.provider ?? 'e2b', data.template_id ?? null,
+      data.session_id ?? null, data.team_id ?? null,
+      data.status ?? 'running', data.url ?? null,
+      JSON.stringify(data.metadata ?? {}), now, now,
+    );
+  }
+  return rowToSandbox(db.prepare('SELECT * FROM agent_sandboxes WHERE id = ?').get(data.id) as any);
+}
+
+export function listSandboxes(filter?: { status?: string; session_id?: string }): SandboxRecord[] {
+  let sql = 'SELECT * FROM agent_sandboxes';
+  const params: any[] = [];
+  const conditions: string[] = [];
+  if (filter?.status) { conditions.push('status = ?'); params.push(filter.status); }
+  if (filter?.session_id) { conditions.push('session_id = ?'); params.push(filter.session_id); }
+  if (conditions.length) sql += ' WHERE ' + conditions.join(' AND ');
+  sql += ' ORDER BY created_at DESC LIMIT 500';
+  return (db.prepare(sql).all(...(params as any[])) as any[]).map(rowToSandbox);
+}
+
+export function getSandboxById(id: string): SandboxRecord | null {
+  const row = db.prepare('SELECT * FROM agent_sandboxes WHERE id = ?').get(id) as any;
+  return row ? rowToSandbox(row) : null;
+}
+
+export function updateAgentFromSession(
+  sessionId: string,
+  updates: { model_name?: string; context_window_percent?: number; last_seen_at?: number }
+): void {
+  const sets: string[] = ['updated_at = ?'];
+  const params: any[] = [Date.now()];
+  if (updates.model_name !== undefined) { sets.push('model_name = ?'); params.push(updates.model_name); }
+  if (updates.context_window_percent !== undefined) { sets.push('context_window_percent = ?'); params.push(updates.context_window_percent); }
+  if (updates.last_seen_at !== undefined) { sets.push('last_seen_at = ?'); params.push(updates.last_seen_at); }
+  params.push(sessionId);
+  db.prepare(`UPDATE orchestration_agents SET ${sets.join(', ')} WHERE source_session_id = ?`).run(...(params as any[]));
+}
+
 export function getOrchestrationSnapshot(): OrchestrationSnapshot {
   const teams = listTeams();
   const team_summaries = getTeamSummaries();
@@ -1554,6 +1679,7 @@ export function getOrchestrationSnapshot(): OrchestrationSnapshot {
     task_runs,
     execution_policies: listExecutionPolicies(),
     execution_environment_kind: getExecutionEnvironmentKind(),
+    sandboxes: listSandboxes(),
   };
 }
 

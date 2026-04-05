@@ -1,31 +1,24 @@
-import { API_BASE_URL } from '../config';
 import type {
   AdminAuditRecord,
   MessageDirection,
   OrchestrationSnapshot,
+  RetentionConfigPayload,
+  SandboxRecord,
   TaskRunHistoryRecord,
 } from '../orchestrationTypes';
-
-const root = `${API_BASE_URL}/api/orchestration`;
-
-async function parse(res: Response) {
-  const text = await res.text();
-  if (!res.ok) {
-    try {
-      const j = JSON.parse(text);
-      throw new Error(j.error || text);
-    } catch (e) {
-      if (e instanceof Error && e.message !== text) throw e;
-      throw new Error(text || res.statusText);
-    }
-  }
-  return text ? JSON.parse(text) : {};
-}
+import {
+  fetchAdminJson,
+  orchestrationAdminHeaders,
+  ORCHESTRATION_API_ROOT,
+  parseOrchestrationJsonResponse,
+} from '../utils/orchestrationHttp';
 
 export function useOrchestrationApi() {
   return {
     async fetchSnapshot(): Promise<OrchestrationSnapshot> {
-      const raw = await parse(await fetch(`${root}/snapshot`));
+      const raw = (await parseOrchestrationJsonResponse(
+        await fetch(`${ORCHESTRATION_API_ROOT}/snapshot`)
+      )) as Record<string, unknown>;
       return {
         ...raw,
         task_transitions: raw.task_transitions ?? [],
@@ -33,7 +26,7 @@ export function useOrchestrationApi() {
         execution_policies: raw.execution_policies ?? [],
         execution_environment_kind:
           raw.execution_environment_kind ?? 'simulated',
-      };
+      } as OrchestrationSnapshot;
     },
 
     async listTaskRunHistory(
@@ -62,7 +55,9 @@ export function useOrchestrationApi() {
       if (params.limit != null) q.set('limit', String(params.limit));
       if (params.offset != null) q.set('offset', String(params.offset));
       const qs = q.toString();
-      return parse(await fetch(`${root}/task-runs${qs ? `?${qs}` : ''}`));
+      return (await parseOrchestrationJsonResponse(
+        await fetch(`${ORCHESTRATION_API_ROOT}/task-runs${qs ? `?${qs}` : ''}`)
+      )) as { runs: TaskRunHistoryRecord[]; total: number; limit: number; offset: number };
     },
 
     async listTaskRunHistoryForTask(
@@ -75,16 +70,18 @@ export function useOrchestrationApi() {
       if (params.q) q.set('q', params.q);
       if (params.status) q.set('status', params.status);
       const qs = q.toString();
-      return parse(await fetch(`${root}/tasks/${taskId}/runs${qs ? `?${qs}` : ''}`));
+      return (await parseOrchestrationJsonResponse(
+        await fetch(`${ORCHESTRATION_API_ROOT}/tasks/${taskId}/runs${qs ? `?${qs}` : ''}`)
+      )) as { runs: TaskRunHistoryRecord[]; total: number; limit: number; offset: number };
     },
 
     async listTeams() {
-      return parse(await fetch(`${root}/teams`));
+      return parseOrchestrationJsonResponse(await fetch(`${ORCHESTRATION_API_ROOT}/teams`));
     },
 
     async createTeam(name: string, description?: string) {
-      return parse(
-        await fetch(`${root}/teams`, {
+      return parseOrchestrationJsonResponse(
+        await fetch(`${ORCHESTRATION_API_ROOT}/teams`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ name, description }),
@@ -93,18 +90,16 @@ export function useOrchestrationApi() {
     },
 
     async deleteTeam(teamId: string) {
-      return parse(await fetch(`${root}/teams/${teamId}`, { method: 'DELETE' }));
+      return parseOrchestrationJsonResponse(
+        await fetch(`${ORCHESTRATION_API_ROOT}/teams/${teamId}`, { method: 'DELETE' })
+      );
     },
 
     async seedDemo(label?: string, adminToken?: string | null) {
-      const headers: Record<string, string> = { 'Content-Type': 'application/json' };
-      if (adminToken?.trim()) {
-        headers['x-orchestration-admin-token'] = adminToken.trim();
-      }
-      return parse(
-        await fetch(`${root}/demo/seed`, {
+      return parseOrchestrationJsonResponse(
+        await fetch(`${ORCHESTRATION_API_ROOT}/demo/seed`, {
           method: 'POST',
-          headers,
+          headers: { 'Content-Type': 'application/json', ...orchestrationAdminHeaders(adminToken) },
           body: JSON.stringify(label ? { label } : {}),
         })
       );
@@ -120,8 +115,8 @@ export function useOrchestrationApi() {
         payload?: Record<string, unknown>;
       }
     ) {
-      return parse(
-        await fetch(`${root}/teams/${teamId}/tasks`, {
+      return parseOrchestrationJsonResponse(
+        await fetch(`${ORCHESTRATION_API_ROOT}/teams/${teamId}/tasks`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(payload),
@@ -130,12 +125,14 @@ export function useOrchestrationApi() {
     },
 
     async cancelTask(taskId: string) {
-      return parse(await fetch(`${root}/tasks/${taskId}/cancel`, { method: 'POST' }));
+      return parseOrchestrationJsonResponse(
+        await fetch(`${ORCHESTRATION_API_ROOT}/tasks/${taskId}/cancel`, { method: 'POST' })
+      );
     },
 
     async createAgent(teamId: string, payload: { name: string; role: string }) {
-      return parse(
-        await fetch(`${root}/teams/${teamId}/agents`, {
+      return parseOrchestrationJsonResponse(
+        await fetch(`${ORCHESTRATION_API_ROOT}/teams/${teamId}/agents`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(payload),
@@ -149,8 +146,8 @@ export function useOrchestrationApi() {
       direction: MessageDirection,
       extras?: { to_agent_id?: string; from_agent_id?: string; kind?: string }
     ) {
-      return parse(
-        await fetch(`${root}/teams/${teamId}/messages`, {
+      return parseOrchestrationJsonResponse(
+        await fetch(`${ORCHESTRATION_API_ROOT}/teams/${teamId}/messages`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
@@ -165,14 +162,14 @@ export function useOrchestrationApi() {
     },
 
     async startExecution(teamId: string) {
-      return parse(
-        await fetch(`${root}/teams/${teamId}/execution/start`, { method: 'POST' })
+      return parseOrchestrationJsonResponse(
+        await fetch(`${ORCHESTRATION_API_ROOT}/teams/${teamId}/execution/start`, { method: 'POST' })
       );
     },
 
     async stopExecution(teamId: string) {
-      return parse(
-        await fetch(`${root}/teams/${teamId}/execution/stop`, { method: 'POST' })
+      return parseOrchestrationJsonResponse(
+        await fetch(`${ORCHESTRATION_API_ROOT}/teams/${teamId}/execution/stop`, { method: 'POST' })
       );
     },
 
@@ -195,12 +192,17 @@ export function useOrchestrationApi() {
       if (params.route) q.set('route', params.route);
       if (params.target_entity_type) q.set('target_entity_type', params.target_entity_type);
       if (params.target_entity_id) q.set('target_entity_id', params.target_entity_id);
-      const qs = q.toString();
-      const headers: Record<string, string> = {};
-      if (adminToken?.trim()) headers['x-orchestration-admin-token'] = adminToken.trim();
-      return parse(
-        await fetch(`${root}/admin-audit${qs ? `?${qs}` : ''}`, { headers })
-      );
+      return fetchAdminJson<{ records: AdminAuditRecord[] }>('admin-audit', {
+        adminToken,
+        searchParams: q,
+      });
+    },
+
+    /** Same admin token semantics as `listAdminAudit`. Does not run prune. */
+    async getRetentionConfig(adminToken?: string | null): Promise<{ retention: RetentionConfigPayload }> {
+      return fetchAdminJson<{ retention: RetentionConfigPayload }>('admin/retention-config', {
+        adminToken,
+      });
     },
 
     /** Requires admin token when server has `ORCH_ADMIN_TOKEN` set. */
@@ -209,14 +211,10 @@ export function useOrchestrationApi() {
       execution_policy_id: string | null,
       adminToken?: string | null
     ) {
-      const headers: Record<string, string> = { 'Content-Type': 'application/json' };
-      if (adminToken?.trim()) {
-        headers['x-orchestration-admin-token'] = adminToken.trim();
-      }
-      return parse(
-        await fetch(`${root}/teams/${teamId}/execution-policy`, {
+      return parseOrchestrationJsonResponse(
+        await fetch(`${ORCHESTRATION_API_ROOT}/teams/${teamId}/execution-policy`, {
           method: 'PUT',
-          headers,
+          headers: { 'Content-Type': 'application/json', ...orchestrationAdminHeaders(adminToken) },
           body: JSON.stringify({ execution_policy_id }),
         })
       );
@@ -224,14 +222,10 @@ export function useOrchestrationApi() {
 
     /** PATCH team (name/description/policy/retry). Policy field changes require admin token when server enforces it. */
     async patchTeam(teamId: string, body: Record<string, unknown>, adminToken?: string | null) {
-      const headers: Record<string, string> = { 'Content-Type': 'application/json' };
-      if (adminToken?.trim()) {
-        headers['x-orchestration-admin-token'] = adminToken.trim();
-      }
-      return parse(
-        await fetch(`${root}/teams/${teamId}`, {
+      return parseOrchestrationJsonResponse(
+        await fetch(`${ORCHESTRATION_API_ROOT}/teams/${teamId}`, {
           method: 'PATCH',
-          headers,
+          headers: { 'Content-Type': 'application/json', ...orchestrationAdminHeaders(adminToken) },
           body: JSON.stringify(body),
         })
       );
@@ -243,17 +237,22 @@ export function useOrchestrationApi() {
       body: Record<string, unknown>,
       adminToken?: string | null
     ) {
-      const headers: Record<string, string> = { 'Content-Type': 'application/json' };
-      if (adminToken?.trim()) {
-        headers['x-orchestration-admin-token'] = adminToken.trim();
-      }
-      return parse(
-        await fetch(`${root}/policies/${policyId}`, {
+      return parseOrchestrationJsonResponse(
+        await fetch(`${ORCHESTRATION_API_ROOT}/policies/${policyId}`, {
           method: 'PATCH',
-          headers,
+          headers: { 'Content-Type': 'application/json', ...orchestrationAdminHeaders(adminToken) },
           body: JSON.stringify(body),
         })
       );
+    },
+
+    async fetchSandboxes(filter?: { status?: string; session_id?: string }): Promise<SandboxRecord[]> {
+      const params = new URLSearchParams();
+      if (filter?.status) params.set('status', filter.status);
+      if (filter?.session_id) params.set('session_id', filter.session_id);
+      const res = await fetch(`${ORCHESTRATION_API_ROOT}/sandboxes${params.toString() ? `?${params}` : ''}`);
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      return res.json();
     },
   };
 }

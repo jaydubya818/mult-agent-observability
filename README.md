@@ -588,8 +588,11 @@ Beyond hook events, this codebase ships a **SQLite-backed orchestration layer** 
 **Quick checks**
 
 - Server tests (orchestration): `cd apps/server && bun test src/orchestration`
-- Optional **retention** env: `ORCH_ADMIN_AUDIT_MAX_DAYS`, `ORCH_ADMIN_AUDIT_MAX_ROWS`, `ORCH_TASK_RUNS_MAX_DAYS`, `ORCH_TASK_RUNS_MAX_ROWS` (see design doc for precedence and what rows are eligible for pruning)
+- **`ORCH_ADMIN_TOKEN`:** When set, **protected mode** — browser/client must send the same value as `x-orchestration-admin-token` or `Authorization: Bearer …` on gated routes. When unset, **open mode** (local default). Admin **read** routes: `GET /api/orchestration/admin-audit`, `GET /api/orchestration/admin/retention-config` (effective retention limits; does not run prune). See [technical design §6](docs/technical-design-multi-agent-orchestration.md).
+- Optional **retention** env: `ORCH_ADMIN_AUDIT_*`, `ORCH_TASK_RUNS_*`, `ORCH_TASK_RUN_HISTORY_*` (live vs archived tables; per-field fallback for history — see design doc §6.3). Apply prune: startup + `POST /api/orchestration/admin/prune-history`.
 - Optional **retry** env: `ORCH_TASK_MAX_ATTEMPTS` (default 1 = no retry), `ORCH_TASK_RETRY_BACKOFF_MS` (default 1000; exponential backoff before re-queue — see design doc §6.4)
+
+Copy [`.env.sample`](.env.sample) for orchestration-related variables (`ORCH_ADMIN_TOKEN`, retention, retry, local-process policy).
 
 ## 🛡️ Security Features
 
@@ -599,6 +602,101 @@ Beyond hook events, this codebase ships a **SQLite-backed orchestration layer** 
 - Stop hook validators ensure plan files contain required sections before completion
 - Local-process execution policies enforce command allow/denylists, cwd roots, and output byte caps for orchestrated agents
 - Validates all inputs before execution
+
+## 🤖 Multi-Agent Orchestration Support
+
+The observability server automatically detects and tracks Claude Code's experimental agent teams feature. When you enable agent teams with:
+
+```bash
+export CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1
+clio  # or claude
+```
+
+The server automatically ingests team lifecycle events and agent communication patterns in real-time.
+
+### Auto-Ingested Team Lifecycle Events
+
+The system tracks the complete multi-agent orchestration workflow:
+
+- **`team_create`** → Creates a team record in the orchestration DB, setting up the coordination layer
+- **`team_delete`** → Marks team as stopped, all agents completed
+- **`task_create`** → Creates task record linked to the team, building the centralized task list
+- **`task_update`** → Updates task status (maps Claude's status names to internal statuses)
+- **`task_list`** / **`task_get`** → Query operations for task introspection
+- **`send_message`** → Records inter-agent communication in message thread
+
+These events are automatically tagged with `_agent_team_tool: true` and `_tool_category: 'agent_team'` for easy server-side identification.
+
+### Per-Agent Context Tracking
+
+Each agent spawned into its own Tmux pane has independent observability:
+
+- **Model type** (Haiku / Sonnet / Opus) shown as colored badge
+- **Context window %** shown as progress bar (red when > 90%)
+- **Session ID** linked to agent card for tracing
+- **Tool calls** traced with full PreToolUse → PostToolUse flow
+
+### E2B Sandbox Tracking (Optional)
+
+The server auto-detects E2B sandbox tool calls and tracks sandbox lifecycle:
+
+- Sandbox creation, URLs, running status
+- Which agent/session created each sandbox
+- Dashboard at `/api/sandboxes` (with filter by `status`, `session_id`)
+
+### Complete Multi-Agent Workflow
+
+The full agent team workflow captured by the observability system:
+
+```
+1. Primary agent calls team_create
+   → Team appears in UI with creation timestamp
+
+2. Primary agent calls task_create (x N)
+   → Tasks appear in TaskBoard with initial status
+
+3. Primary agent spawns sub-agents (via tmux panes in Claude Code)
+   → Each gets unique session_id, model, context window
+
+4. Sub-agents execute tasks in parallel
+   → Each tool call flows through PreToolUse/PostToolUse hooks
+   → Context window % tracked per agent
+
+5. Sub-agents communicate via send_message
+   → Messages appear in Communication Timeline
+   → Threaded by task_id and agent_id
+
+6. Sub-agents call task_update (status: completed)
+   → TaskBoard updates in real-time
+   → Task run history recorded in orchestration_task_run_history
+
+7. Primary agent calls team_delete
+   → Team shows as stopped in UI
+```
+
+### New UI Panels & Visualizations
+
+| Panel | Description |
+|-------|-------------|
+| **Agent Swimlanes** | Per-agent cards with model badge, context window %, session ID |
+| **Parallel Activity Chart** | Time-aligned Gantt view of concurrent agent work |
+| **Agent Communication Timeline** | send_message events rendered as threaded messages |
+| **Sandbox Dashboard** | E2B sandbox lifecycle with URLs and status |
+| **TaskBoard** | Orchestration task list with live status updates |
+
+### New Environment Variables
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `ORCH_TASK_RUN_HISTORY_MAX_DAYS` | (inherits ORCH_TASK_RUNS_MAX_DAYS) | Retention days for task run history |
+| `ORCH_TASK_RUN_HISTORY_MAX_ROWS` | (inherits ORCH_TASK_RUNS_MAX_ROWS) | Max rows in task run history table |
+
+### New API Endpoints
+
+- **`GET /api/sandboxes`** - List all tracked sandboxes (filter by `status`, `session_id`)
+- **`GET /api/sandboxes/:id`** - Get specific sandbox details
+- **`GET /api/orchestration/admin/retention-config`** - View effective retention limits
+- **`POST /api/orchestration/admin/prune-history`** - Trigger data pruning
 
 ## 📊 Technical Stack
 

@@ -117,6 +117,12 @@ describe('ORCH_ADMIN_TOKEN (protected mode)', () => {
     expect(res!.status).toBe(401);
   });
 
+  test('GET /admin/retention-config 401 without token when protected', async () => {
+    const req = new Request('http://localhost/api/orchestration/admin/retention-config', { method: 'GET' });
+    const res = await orch.handleOrchestrationFetch(req, new URL(req.url), CORS);
+    expect(res!.status).toBe(401);
+  });
+
   test('GET /admin-audit 200 with token', async () => {
     const req = new Request('http://localhost/api/orchestration/admin-audit', {
       method: 'GET',
@@ -126,6 +132,17 @@ describe('ORCH_ADMIN_TOKEN (protected mode)', () => {
     expect(res!.status).toBe(200);
     const j = (await res!.json()) as { records: unknown[] };
     expect(Array.isArray(j.records)).toBe(true);
+  });
+
+  test('GET /admin/retention-config 200 with token', async () => {
+    const req = new Request('http://localhost/api/orchestration/admin/retention-config', {
+      method: 'GET',
+      headers: { 'x-orchestration-admin-token': ADMIN_TOKEN },
+    });
+    const res = await orch.handleOrchestrationFetch(req, new URL(req.url), CORS);
+    expect(res!.status).toBe(200);
+    const j = (await res!.json()) as { retention: { read_only: boolean } };
+    expect(j.retention.read_only).toBe(true);
   });
 
   test('PUT team execution-policy assigns when authorized', async () => {
@@ -235,5 +252,13 @@ describe('ORCH_ADMIN_TOKEN unset (open mode)', () => {
     const req = new Request('http://localhost/api/orchestration/admin-audit', { method: 'GET' });
     const res = await orch.handleOrchestrationFetch(req, new URL(req.url), CORS);
     expect(res!.status).toBe(200);
+  });
+
+  test('GET /admin/retention-config works without token in open mode', async () => {
+    const req = new Request('http://localhost/api/orchestration/admin/retention-config', { method: 'GET' });
+    const res = await orch.handleOrchestrationFetch(req, new URL(req.url), CORS);
+    expect(res!.status).toBe(200);
+    const j = (await res!.json()) as { retention: { read_only: boolean } };
+    expect(j.retention.read_only).toBe(true);
   });
 });

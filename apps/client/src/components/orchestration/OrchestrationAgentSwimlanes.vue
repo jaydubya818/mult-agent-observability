@@ -24,11 +24,28 @@
         @keydown.enter="$emit('select-agent', a.id)"
       >
         <div class="flex justify-between gap-2">
-          <div>
-            <div class="text-sm font-semibold">{{ a.name }}</div>
+          <div class="min-w-0">
+            <div class="text-sm font-semibold truncate">{{ a.name }}</div>
             <div class="text-[11px] text-[var(--theme-text-tertiary)] uppercase tracking-wide">{{ a.role }}</div>
           </div>
-          <span class="text-[10px] px-2 py-0.5 rounded-full font-semibold" :class="agentStatusPillClass(a.status)">{{ a.status }}</span>
+          <div class="flex flex-col items-end gap-1 shrink-0">
+            <span class="text-[10px] px-2 py-0.5 rounded-full font-semibold" :class="agentStatusPillClass(a.status)">{{ a.status }}</span>
+            <span v-if="(a as any).model_name" class="text-[9px] px-1.5 py-0.5 rounded font-mono font-semibold" :class="modelBadgeClass((a as any).model_name)">{{ modelLabel((a as any).model_name) }}</span>
+          </div>
+        </div>
+        <!-- Context window progress bar -->
+        <div v-if="(a as any).context_window_percent != null" class="mt-2">
+          <div class="flex justify-between text-[10px] text-[var(--theme-text-tertiary)] mb-0.5">
+            <span>Context</span>
+            <span>{{ ((a as any).context_window_percent as number).toFixed(1) }}%</span>
+          </div>
+          <div class="h-1 rounded-full bg-[var(--theme-bg-tertiary)] overflow-hidden">
+            <div
+              class="h-full rounded-full transition-all duration-300"
+              :class="contextWindowBarClass((a as any).context_window_percent as number)"
+              :style="{ width: Math.min((a as any).context_window_percent as number, 100) + '%' }"
+            />
+          </div>
         </div>
         <p class="text-[11px] text-[var(--theme-text-secondary)] mt-2">
           {{
@@ -66,4 +83,24 @@ const filteredAgents = computed(() => {
   if (!props.statusFilter) return props.agents;
   return props.agents.filter((a) => a.status === props.statusFilter);
 });
+
+function modelLabel(modelName: string): string {
+  if (modelName.includes('haiku')) return 'Haiku';
+  if (modelName.includes('sonnet')) return 'Sonnet';
+  if (modelName.includes('opus')) return 'Opus';
+  return modelName.split('/').pop()?.split('-').slice(0, 2).join('-') ?? modelName;
+}
+
+function modelBadgeClass(modelName: string): string {
+  if (modelName.includes('haiku')) return 'bg-emerald-500/20 text-emerald-400';
+  if (modelName.includes('sonnet')) return 'bg-blue-500/20 text-blue-400';
+  if (modelName.includes('opus')) return 'bg-purple-500/20 text-purple-400';
+  return 'bg-[var(--theme-bg-tertiary)] text-[var(--theme-text-secondary)]';
+}
+
+function contextWindowBarClass(pct: number): string {
+  if (pct >= 90) return 'bg-red-500';
+  if (pct >= 75) return 'bg-amber-500';
+  return 'bg-[var(--theme-primary)]';
+}
 </script>
