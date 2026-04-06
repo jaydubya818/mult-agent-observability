@@ -1,6 +1,13 @@
 <template>
   <div class="orch-root min-h-full flex flex-col bg-[var(--theme-bg-secondary)] text-[var(--theme-text-primary)]">
-    <TeamToolbar :disabled="busy" @seed-demo="runSeedDemo" @refresh="refreshSnapshot" />
+    <TeamToolbar
+      :disabled="busy"
+      :summary="orchestrationSummary"
+      :selected-team-name="activeTeam?.name ?? null"
+      :selected-team-status="activeTeam?.execution_status ?? null"
+      @seed-demo="runSeedDemo"
+      @refresh="refreshSnapshot"
+    />
     <details class="px-4 py-2 border-b border-[var(--theme-border-primary)] bg-[var(--theme-bg-secondary)]/60 text-[10px]" @toggle="onAdminAuditToggle">
       <summary class="cursor-pointer font-semibold text-[var(--theme-text-secondary)] select-none">
         Recent admin mutations
@@ -65,17 +72,25 @@
 
       <section v-if="activeTeam" class="flex-1 min-w-0 flex flex-col overflow-hidden">
         <div
-          class="px-4 py-3 border-b border-[var(--theme-border-primary)] flex flex-wrap items-center gap-3 justify-between bg-[var(--theme-bg-secondary)]/80"
+          class="px-4 py-4 border-b border-[var(--theme-border-primary)] flex flex-wrap items-center gap-3 justify-between bg-[var(--theme-bg-secondary)]/80"
         >
           <div>
-            <h3 class="text-base font-semibold">{{ activeTeam.name }}</h3>
-            <p class="text-xs text-[var(--theme-text-tertiary)]">
+            <h3 class="text-xl font-semibold tracking-tight">{{ activeTeam.name }}</h3>
+            <p class="mt-1 text-sm text-[var(--theme-text-tertiary)]">
               {{ activeTeam.description || 'No description' }}
             </p>
-            <p class="text-[10px] text-[var(--theme-text-tertiary)] mt-1">
-              Execution adapter:
-              <span class="font-mono text-[var(--theme-text-secondary)]">{{ executionKind }}</span>
-            </p>
+            <div class="mt-3 flex flex-wrap gap-2 text-[11px]">
+              <span class="rounded-full border border-[var(--theme-border-secondary)] bg-[var(--theme-bg-primary)] px-3 py-1 text-[var(--theme-text-secondary)]">
+                Execution adapter:
+                <span class="ml-1 font-mono">{{ executionKind }}</span>
+              </span>
+              <span
+                class="rounded-full px-3 py-1 font-medium"
+                :class="activeTeam.execution_status === 'running' ? 'bg-emerald-500/10 text-emerald-700' : 'bg-slate-500/10 text-slate-700'"
+              >
+                {{ activeTeam.execution_status === 'running' ? 'Execution live' : 'Execution stopped' }}
+              </span>
+            </div>
             <p v-if="executionKind === 'local_process' && teamPolicyLine" class="text-[10px] text-[var(--theme-text-tertiary)] mt-0.5">
               Policy:
               <span class="font-mono text-[var(--theme-text-secondary)]">{{ teamPolicyLine }}</span>
@@ -317,6 +332,7 @@ import TaskRunHistorySection from './TaskRunHistorySection.vue';
 import SandboxDashboard from './SandboxDashboard.vue';
 import ParallelActivityChart from './ParallelActivityChart.vue';
 import AgentCommunicationTimeline from './AgentCommunicationTimeline.vue';
+import { buildOrchestrationSummary } from '../../utils/commandCenterSummary';
 
 const emit = defineEmits<{ snapshot: [OrchestrationSnapshot] }>();
 
@@ -381,6 +397,8 @@ function onClearPolicyRetryAck(policyId: string) {
 }
 
 const snapshotReady = computed(() => props.snapshot !== null);
+
+const orchestrationSummary = computed(() => buildOrchestrationSummary(props.snapshot));
 
 const executionKind = computed(
   () => props.snapshot?.execution_environment_kind ?? 'simulated'

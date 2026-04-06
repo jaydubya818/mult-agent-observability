@@ -80,6 +80,13 @@ db-reset:
 
 # ─── Testing ─────────────────────────────────────────────
 
+# Run the core verification suite across both apps
+verify:
+    cd {{project_root}}/apps/server && bun run typecheck
+    cd {{project_root}}/apps/server && bun test src/orchestration
+    cd {{project_root}}/apps/client && bun test src/utils
+    cd {{project_root}}/apps/client && bun run build
+
 # Send a test event to the server
 test-event:
     curl -s -X POST http://localhost:{{server_port}}/events \

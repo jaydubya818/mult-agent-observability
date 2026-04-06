@@ -1,7 +1,6 @@
 <template>
-  <div class="h-screen flex flex-col bg-[var(--theme-bg-secondary)]">
-    <!-- Header with Primary Theme Colors -->
-    <header class="short:hidden bg-gradient-to-r from-[var(--theme-primary)] to-[var(--theme-primary-light)] shadow-lg border-b-2 border-[var(--theme-primary-dark)]">
+  <div class="h-screen flex flex-col bg-[var(--theme-bg-secondary)] text-[var(--theme-text-primary)]">
+    <header class="short:hidden border-b border-[var(--theme-primary-dark)]/20 bg-[radial-gradient(circle_at_top_left,_rgba(255,255,255,0.28),_transparent_36%),linear-gradient(115deg,var(--theme-primary-dark),var(--theme-primary),var(--theme-primary-light))] shadow-lg">
       <div class="px-3 py-4 mobile:py-1.5 mobile:px-2 flex items-center justify-between mobile:gap-2">
         <!-- Title Section - Hidden on mobile -->
         <div class="flex flex-col gap-2 min-w-0 mobile:min-w-0">
@@ -63,7 +62,7 @@
 
         <!-- Event Count and Theme Toggle -->
         <div class="flex items-center mobile:space-x-1 space-x-2">
-          <span class="text-base mobile:text-xs text-white font-semibold drop-shadow-md bg-[var(--theme-primary-dark)] mobile:px-2 mobile:py-0.5 px-3 py-1.5 rounded-full border border-white/30">
+          <span class="text-base mobile:text-xs text-white font-semibold drop-shadow-md bg-[var(--theme-primary-dark)]/75 mobile:px-2 mobile:py-0.5 px-3 py-1.5 rounded-full border border-white/30">
             {{ events.length }}
           </span>
 
@@ -96,6 +95,62 @@
         </div>
       </div>
     </header>
+
+    <section class="border-b border-[var(--theme-border-primary)] bg-[var(--theme-bg-primary)]/90 px-4 py-3 backdrop-blur-sm mobile:px-3">
+      <div class="flex flex-wrap items-start justify-between gap-4">
+        <div class="space-y-1">
+          <p class="text-[11px] font-semibold uppercase tracking-[0.22em] text-[var(--theme-text-tertiary)]">
+            {{ activeSurface === 'observe' ? 'Telemetry posture' : 'Execution posture' }}
+          </p>
+          <h2 class="text-lg font-semibold tracking-tight">
+            {{ activeSurface === 'observe' ? 'Watch hooks, sessions, and tool flow in real time' : 'Run teams with clearer operational context' }}
+          </h2>
+          <p class="text-sm text-[var(--theme-text-tertiary)]">
+            {{ surfaceLead }}
+          </p>
+        </div>
+        <div class="flex flex-wrap items-center gap-2 text-xs">
+          <span class="rounded-full border border-[var(--theme-border-secondary)] bg-[var(--theme-bg-secondary)] px-3 py-1.5 font-medium text-[var(--theme-text-secondary)]">
+            {{ activeSurface === 'observe' ? 'Live stream' : 'Control plane' }}
+          </span>
+          <span
+            class="rounded-full px-3 py-1.5 font-medium"
+            :class="
+              isConnected
+                ? 'bg-emerald-500/10 text-emerald-700 border border-emerald-500/30'
+                : 'bg-rose-500/10 text-rose-700 border border-rose-500/30'
+            "
+          >
+            {{ isConnected ? 'Socket healthy' : 'Socket reconnecting' }}
+          </span>
+        </div>
+      </div>
+
+      <div class="mt-4 grid gap-3 md:grid-cols-2 xl:grid-cols-4">
+        <article
+          v-for="card in surfaceSummaryCards"
+          :key="card.label"
+          class="rounded-2xl border border-[var(--theme-border-secondary)] bg-[var(--theme-bg-primary)] px-4 py-3 shadow-sm transition-transform duration-200 hover:-translate-y-0.5"
+        >
+          <div class="flex items-start justify-between gap-3">
+            <div>
+              <p class="text-[11px] font-semibold uppercase tracking-[0.18em] text-[var(--theme-text-tertiary)]">
+                {{ card.label }}
+              </p>
+              <p class="mt-2 text-2xl font-semibold tracking-tight">
+                {{ card.value }}
+              </p>
+            </div>
+            <span class="rounded-full px-2.5 py-1 text-[11px] font-semibold" :class="card.badgeClass">
+              {{ card.badge }}
+            </span>
+          </div>
+          <p class="mt-2 text-xs leading-relaxed text-[var(--theme-text-tertiary)]">
+            {{ card.help }}
+          </p>
+        </article>
+      </div>
+    </section>
     
     <template v-if="activeSurface === 'observe'">
     <!-- Filters -->
@@ -180,7 +235,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, watch } from 'vue';
+import { computed, onMounted, ref, watch } from 'vue';
 import type { TimeRange } from './types';
 import { useWebSocket } from './composables/useWebSocket';
 import { useThemes } from './composables/useThemes';
@@ -195,10 +250,15 @@ import AgentSwimLaneContainer from './components/AgentSwimLaneContainer.vue';
 import OrchestrationPanel from './components/orchestration/OrchestrationPanel.vue';
 import { WS_URL } from './config';
 import type { OrchestrationSnapshot } from './orchestrationTypes';
+import {
+  buildObservabilitySummary,
+  buildOrchestrationSummary,
+} from './utils/commandCenterSummary';
 
 // WebSocket connection
 const { events, orchestration, isConnected, error, clearEvents } = useWebSocket(WS_URL);
 
+const ACTIVE_SURFACE_STORAGE_KEY = 'command_center_active_surface';
 const activeSurface = ref<'observe' | 'orchestrate'>('observe');
 
 function onOrchestrationSnapshot(snapshot: OrchestrationSnapshot) {
@@ -226,6 +286,124 @@ const uniqueAppNames = ref<string[]>([]); // Apps active in current time window
 const allAppNames = ref<string[]>([]); // All apps ever seen in session
 const selectedAgentLanes = ref<string[]>([]);
 const currentTimeRange = ref<TimeRange>('1m'); // Current time range from LivePulseChart
+
+onMounted(() => {
+  try {
+    const storedSurface = window.localStorage.getItem(ACTIVE_SURFACE_STORAGE_KEY);
+    if (storedSurface === 'observe' || storedSurface === 'orchestrate') {
+      activeSurface.value = storedSurface;
+    }
+  } catch {
+    /* ignore storage failures */
+  }
+});
+
+watch(activeSurface, (surface) => {
+  try {
+    window.localStorage.setItem(ACTIVE_SURFACE_STORAGE_KEY, surface);
+  } catch {
+    /* ignore storage failures */
+  }
+});
+
+const observabilitySummary = computed(() => buildObservabilitySummary(events.value));
+const orchestrationSummary = computed(() => buildOrchestrationSummary(orchestration.value));
+
+function formatRelativeTimestamp(timestamp: number | null): string {
+  if (timestamp == null) return 'Waiting for the first signal';
+  const deltaSeconds = Math.max(0, Math.floor((Date.now() - timestamp) / 1000));
+  if (deltaSeconds < 10) return 'Updated just now';
+  if (deltaSeconds < 60) return `Updated ${deltaSeconds}s ago`;
+  const deltaMinutes = Math.floor(deltaSeconds / 60);
+  if (deltaMinutes < 60) return `Updated ${deltaMinutes}m ago`;
+  const deltaHours = Math.floor(deltaMinutes / 60);
+  return `Updated ${deltaHours}h ago`;
+}
+
+const surfaceLead = computed(() => {
+  if (activeSurface.value === 'observe') {
+    const summary = observabilitySummary.value;
+    const dominantHook = summary.dominantHookType ?? 'No hook trend yet';
+    return `${formatRelativeTimestamp(summary.latestEventAt)} · dominant hook: ${dominantHook}`;
+  }
+
+  const summary = orchestrationSummary.value;
+  if (!orchestration.value) {
+    return 'Waiting for orchestration snapshot from the server.';
+  }
+  return `${summary.runningTeams} of ${summary.totalTeams} teams active · ${summary.attentionTasks} tasks currently need operator attention`;
+});
+
+const surfaceSummaryCards = computed(() => {
+  if (activeSurface.value === 'observe') {
+    const summary = observabilitySummary.value;
+    return [
+      {
+        label: 'Tracked agents',
+        value: summary.trackedAgents,
+        badge: 'Coverage',
+        badgeClass: 'bg-sky-500/10 text-sky-700',
+        help: 'Distinct source apps currently represented in the event stream.',
+      },
+      {
+        label: 'Live sessions',
+        value: summary.activeSessions,
+        badge: 'Concurrency',
+        badgeClass: 'bg-indigo-500/10 text-indigo-700',
+        help: 'Unique Claude Code sessions active in this dashboard view.',
+      },
+      {
+        label: 'Tool calls',
+        value: summary.toolCalls,
+        badge: 'Flow',
+        badgeClass: 'bg-emerald-500/10 text-emerald-700',
+        help: 'Pre/Post tool events captured across the live telemetry window.',
+      },
+      {
+        label: 'Approval prompts',
+        value: summary.approvalRequests,
+        badge: 'Risk',
+        badgeClass: 'bg-amber-500/10 text-amber-700',
+        help: 'Permission and HITL prompts that required explicit operator attention.',
+      },
+    ];
+  }
+
+  const summary = orchestrationSummary.value;
+  return [
+    {
+      label: 'Running teams',
+      value: summary.runningTeams,
+      badge: 'Exec',
+      badgeClass: 'bg-emerald-500/10 text-emerald-700',
+      help: 'Teams actively executing work right now.',
+    },
+    {
+      label: 'Tracked agents',
+      value: summary.trackedAgents,
+      badge: 'Capacity',
+      badgeClass: 'bg-sky-500/10 text-sky-700',
+      help: 'Agents currently registered across all orchestration teams.',
+    },
+    {
+      label: 'Queued and running',
+      value: summary.queuedTasks + summary.activeTasks,
+      badge: 'Queue',
+      badgeClass: 'bg-indigo-500/10 text-indigo-700',
+      help: 'Work either waiting for an agent slot or executing now.',
+    },
+    {
+      label: 'Needs attention',
+      value: summary.attentionTasks,
+      badge: summary.attentionTasks > 0 ? 'Review' : 'Healthy',
+      badgeClass:
+        summary.attentionTasks > 0
+          ? 'bg-rose-500/10 text-rose-700'
+          : 'bg-emerald-500/10 text-emerald-700',
+      help: 'Failed, blocked, or timed-out tasks that should not be ignored.',
+    },
+  ];
+});
 
 // Toast notifications
 interface Toast {
