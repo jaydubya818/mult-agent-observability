@@ -178,6 +178,47 @@
         <div class="flex-1 overflow-y-auto p-4 space-y-4">
           <TeamSummaryCards :summary="activeTeamSummary" />
 
+          <section
+            v-if="showTeamOnboarding"
+            class="rounded-2xl border border-dashed border-[var(--theme-border-secondary)] bg-[var(--theme-bg-primary)]/75 p-4"
+          >
+            <div class="flex flex-wrap items-start justify-between gap-4">
+              <div class="max-w-2xl">
+                <p class="text-[11px] font-semibold uppercase tracking-[0.22em] text-[var(--theme-text-tertiary)]">
+                  Team setup guide
+                </p>
+                <h4 class="mt-1 text-lg font-semibold tracking-tight">
+                  This team is ready for its first piece of work
+                </h4>
+                <p class="mt-2 text-sm leading-relaxed text-[var(--theme-text-tertiary)]">
+                  Start simple: enqueue one explicit task, inspect its detail panel, then start execution when you are confident the retry and policy settings match your intent.
+                </p>
+              </div>
+              <button
+                type="button"
+                class="rounded-xl border border-[var(--theme-border-secondary)] bg-[var(--theme-bg-secondary)] px-3 py-2 text-sm font-medium"
+                :disabled="busy"
+                @click="runSeedDemo"
+              >
+                Seed demo instead
+              </button>
+            </div>
+
+            <div class="mt-4 grid gap-3 md:grid-cols-3">
+              <article
+                v-for="step in teamOnboardingSteps"
+                :key="step.title"
+                class="rounded-2xl border border-[var(--theme-border-secondary)] bg-[var(--theme-bg-primary)] px-4 py-3 shadow-sm"
+              >
+                <p class="text-[11px] font-semibold uppercase tracking-[0.18em] text-[var(--theme-text-tertiary)]">
+                  {{ step.step }}
+                </p>
+                <h5 class="mt-2 text-base font-semibold tracking-tight">{{ step.title }}</h5>
+                <p class="mt-2 text-sm leading-relaxed text-[var(--theme-text-tertiary)]">{{ step.body }}</p>
+              </article>
+            </div>
+          </section>
+
           <SandboxDashboard
             :sandboxes="sandboxes"
             @refresh="refreshSandboxes"
@@ -270,9 +311,49 @@
       </div>
       <div
         v-else-if="snapshot.teams.length === 0"
-        class="flex-1 flex items-center justify-center text-sm text-[var(--theme-text-tertiary)] p-8"
+        class="flex-1 flex items-center justify-center p-8"
       >
-        Create a team to orchestrate parallel work and watch live status.
+        <section class="w-full max-w-4xl rounded-3xl border border-[var(--theme-border-secondary)] bg-[var(--theme-bg-primary)]/80 p-6 shadow-sm">
+          <p class="text-[11px] font-semibold uppercase tracking-[0.24em] text-[var(--theme-text-tertiary)]">
+            First-run orchestration
+          </p>
+          <h3 class="mt-2 text-2xl font-semibold tracking-tight">
+            Build one team, then prove the operator loop works
+          </h3>
+          <p class="mt-2 max-w-2xl text-sm leading-relaxed text-[var(--theme-text-tertiary)]">
+            Create a team from the sidebar or seed the built-in demo. The goal is not to add every feature first, it is to establish a calm loop: create work, inspect state, start execution, and review outcomes.
+          </p>
+          <div class="mt-5 grid gap-3 md:grid-cols-3">
+            <article
+              v-for="step in emptyStateSteps"
+              :key="step.title"
+              class="rounded-2xl border border-[var(--theme-border-secondary)] bg-[var(--theme-bg-secondary)]/60 p-4"
+            >
+              <p class="text-[11px] font-semibold uppercase tracking-[0.18em] text-[var(--theme-text-tertiary)]">
+                {{ step.step }}
+              </p>
+              <h4 class="mt-2 text-base font-semibold tracking-tight">{{ step.title }}</h4>
+              <p class="mt-2 text-sm leading-relaxed text-[var(--theme-text-tertiary)]">{{ step.body }}</p>
+            </article>
+          </div>
+          <div class="mt-5 flex flex-wrap gap-2">
+            <button
+              type="button"
+              class="rounded-xl bg-[var(--theme-primary)] px-4 py-2 text-sm font-medium text-white"
+              :disabled="busy"
+              @click="runSeedDemo"
+            >
+              Seed 2×4 demo
+            </button>
+            <button
+              type="button"
+              class="rounded-xl border border-[var(--theme-border-secondary)] bg-[var(--theme-bg-secondary)] px-4 py-2 text-sm font-medium"
+              @click="refreshSnapshot"
+            >
+              Refresh snapshot
+            </button>
+          </div>
+        </section>
       </div>
       <div v-else class="flex-1 flex items-center justify-center text-sm text-[var(--theme-text-tertiary)] p-8">
         Select a team to orchestrate parallel work and watch live status.
@@ -492,6 +573,10 @@ const metricsForTeam = computed(() => {
   return props.snapshot.metrics.filter((m) => m.team_id === selectedTeamId.value);
 });
 
+const showTeamOnboarding = computed(
+  () => !!activeTeam.value && agentsForTeam.value.length === 0 && tasksForTeam.value.length === 0
+);
+
 const taskColumns: { status: TaskStatus; label: string }[] = [
   { status: 'backlog', label: 'Backlog' },
   { status: 'queued', label: 'Queued' },
@@ -692,6 +777,8 @@ async function savePolicyRetry(policyId: string, patch: Record<string, unknown>)
 async function runSeedDemo() {
   await runWithError(async () => {
     await api.seedDemo(undefined, orchAdminTokenLocal.value || undefined);
+    const snap: OrchestrationSnapshot = await api.fetchSnapshot();
+    emit('snapshot', snap);
   });
 }
 
@@ -699,8 +786,13 @@ async function createTeam() {
   const name = newTeamName.value.trim();
   if (!name) return;
   await runWithError(async () => {
-    await api.createTeam(name);
+    const created = (await api.createTeam(name)) as { id?: string };
     newTeamName.value = '';
+    if (typeof created.id === 'string') {
+      selectedTeamId.value = created.id;
+    }
+    const snap: OrchestrationSnapshot = await api.fetchSnapshot();
+    emit('snapshot', snap);
   });
 }
 
@@ -720,13 +812,19 @@ async function addTask() {
       executionKind.value === 'local_process' && shell
         ? { command: ['sh', '-c', shell] }
         : undefined;
-    await api.createTask(activeTeam.value!.id, {
+    const created = (await api.createTask(activeTeam.value!.id, {
       title: newTaskTitle.value.trim(),
       priority: newTaskPriority.value,
       ...(payload ? { payload } : {}),
-    });
+    })) as { id?: string };
     newTaskTitle.value = '';
     newTaskShellCommand.value = '';
+    const snap: OrchestrationSnapshot = await api.fetchSnapshot();
+    emit('snapshot', snap);
+    if (typeof created.id === 'string') {
+      selectedTaskId.value = created.id;
+      taskDetailOpen.value = true;
+    }
   });
 }
 
@@ -786,4 +884,40 @@ async function refreshSandboxes() {
     // Silent fail for sandbox fetching
   }
 }
+
+const emptyStateSteps = [
+  {
+    step: 'Step 1',
+    title: 'Create one team',
+    body: 'Use the sidebar input when you want a blank slate, or seed the 2×4 demo if you want realistic activity immediately.',
+  },
+  {
+    step: 'Step 2',
+    title: 'Enqueue explicit work',
+    body: 'Start with a small task that has a clear result so the operator can verify retries, transitions, and detail views.',
+  },
+  {
+    step: 'Step 3',
+    title: 'Start execution deliberately',
+    body: 'Once the queue looks correct, start the run and watch task history, messages, and events stay coherent under load.',
+  },
+];
+
+const teamOnboardingSteps = [
+  {
+    step: 'Step 1',
+    title: 'Add the first task',
+    body: 'Use the queue composer below to create one explicit task with a short, operator-readable title.',
+  },
+  {
+    step: 'Step 2',
+    title: 'Review retry defaults',
+    body: 'Check the retry summary before execution so failures behave predictably instead of surprisingly.',
+  },
+  {
+    step: 'Step 3',
+    title: 'Start and inspect',
+    body: 'Run the team only after the queue is intentional, then use task detail and run history as your source of truth.',
+  },
+];
 </script>

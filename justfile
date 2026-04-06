@@ -87,6 +87,10 @@ verify:
     cd {{project_root}}/apps/client && bun test src/utils
     cd {{project_root}}/apps/client && bun run build
 
+# Run browser-backed smoke coverage against a running local client
+verify-browser-smoke:
+    {{project_root}}/scripts/browser-smoke.sh
+
 # Send a test event to the server
 test-event:
     curl -s -X POST http://localhost:{{server_port}}/events \

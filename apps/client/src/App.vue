@@ -150,6 +150,56 @@
           </p>
         </article>
       </div>
+
+      <div
+        v-if="showObservabilityOnboarding"
+        class="mt-4 rounded-2xl border border-dashed border-[var(--theme-border-secondary)] bg-[var(--theme-bg-secondary)]/70 p-4"
+      >
+        <div class="flex flex-wrap items-start justify-between gap-4">
+          <div class="max-w-2xl">
+            <p class="text-[11px] font-semibold uppercase tracking-[0.22em] text-[var(--theme-text-tertiary)]">
+              First signal guide
+            </p>
+            <h3 class="mt-1 text-base font-semibold tracking-tight">
+              Bring your first project into the stream
+            </h3>
+            <p class="mt-2 text-sm leading-relaxed text-[var(--theme-text-tertiary)]">
+              This surface becomes useful once a Claude Code session is emitting hook events. Start with one connected repo,
+              verify the stream, then expand to orchestration once you trust the telemetry.
+            </p>
+          </div>
+          <div class="flex flex-wrap gap-2">
+            <button
+              type="button"
+              class="rounded-xl bg-[var(--theme-primary)] px-3 py-2 text-sm font-medium text-white"
+              @click="showFilters = true"
+            >
+              Open filters
+            </button>
+            <button
+              type="button"
+              class="rounded-xl border border-[var(--theme-border-secondary)] bg-[var(--theme-bg-primary)] px-3 py-2 text-sm font-medium"
+              @click="activeSurface = 'orchestrate'"
+            >
+              Go to orchestration
+            </button>
+          </div>
+        </div>
+
+        <div class="mt-4 grid gap-3 md:grid-cols-3">
+          <article
+            v-for="step in observabilityOnboardingSteps"
+            :key="step.title"
+            class="rounded-2xl border border-[var(--theme-border-secondary)] bg-[var(--theme-bg-primary)] px-4 py-3 shadow-sm"
+          >
+            <p class="text-[11px] font-semibold uppercase tracking-[0.18em] text-[var(--theme-text-tertiary)]">
+              {{ step.step }}
+            </p>
+            <h4 class="mt-2 text-base font-semibold tracking-tight">{{ step.title }}</h4>
+            <p class="mt-2 text-sm leading-relaxed text-[var(--theme-text-tertiary)]">{{ step.body }}</p>
+          </article>
+        </div>
+      </div>
     </section>
     
     <template v-if="activeSurface === 'observe'">
@@ -404,6 +454,28 @@ const surfaceSummaryCards = computed(() => {
     },
   ];
 });
+
+const showObservabilityOnboarding = computed(
+  () => activeSurface.value === 'observe' && events.value.length === 0
+);
+
+const observabilityOnboardingSteps = [
+  {
+    step: 'Step 1',
+    title: 'Wire one project',
+    body: 'Copy the observability .claude hooks into a project you already use, then point it at this dashboard.',
+  },
+  {
+    step: 'Step 2',
+    title: 'Run any normal command',
+    body: 'A simple Claude Code prompt is enough to verify PreToolUse, PostToolUse, and session-level events are flowing.',
+  },
+  {
+    step: 'Step 3',
+    title: 'Validate the stream',
+    body: 'Watch the pulse chart, confirm the event feed populates, then use filters to isolate a single source app or session.',
+  },
+];
 
 // Toast notifications
 interface Toast {

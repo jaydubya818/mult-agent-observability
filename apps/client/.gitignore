@@ -22,3 +22,9 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+
+# Stale Vite / IDE artifacts (sources are *.vue)
+*.vue.js
+
+# Generated source artifacts; the client source of truth is *.ts + *.vue
+src/**/*.js
