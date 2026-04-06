@@ -450,11 +450,15 @@ export async function handleOrchestrationRequest(
       teamId
     ) {
       if (!getTeamById(teamId)) return json({ error: 'team not found' }, 404, h);
-      return json({
-        team_id: teamId,
-        adapter_kind: 'local_process',
-        effective: getEffectiveLocalProcessPolicyForTeam(teamId),
-      });
+      return json(
+        {
+          team_id: teamId,
+          adapter_kind: 'local_process',
+          effective: getEffectiveLocalProcessPolicyForTeam(teamId),
+        },
+        200,
+        h
+      );
     }
 
     // PATCH /api/orchestration/teams/:teamId
@@ -572,10 +576,14 @@ export async function handleOrchestrationRequest(
         target_entity_id: teamId,
         metadata: { execution_policy_id: pid ?? null },
       });
-      return json({
-        team: updated,
-        effective: getEffectiveLocalProcessPolicyForTeam(teamId),
-      });
+      return json(
+        {
+          team: updated,
+          effective: getEffectiveLocalProcessPolicyForTeam(teamId),
+        },
+        200,
+        h
+      );
     }
 
     // GET /api/orchestration/teams/:teamId
@@ -642,12 +650,14 @@ export async function handleOrchestrationRequest(
 
     // GET /api/orchestration/teams/:teamId/messages
     if (req.method === 'GET' && parts[2] === 'teams' && parts[4] === 'messages' && parts.length === 5 && teamId) {
+      if (!getTeamById(teamId)) return json({ error: 'team not found' }, 404, h);
       const messages = listMessages(teamId, 400);
       return new Response(JSON.stringify({ messages }), { headers: h });
     }
 
     // POST /api/orchestration/teams/:teamId/messages
     if (req.method === 'POST' && parts[2] === 'teams' && parts[4] === 'messages' && parts.length === 5 && teamId) {
+      if (!getTeamById(teamId)) return json({ error: 'team not found' }, 404, h);
       const body = await safeJson(req);
       if (!body?.body || typeof body.body !== 'string') return json({ error: 'body is required' }, 400, h);
       const direction = body.direction as MessageDirection;

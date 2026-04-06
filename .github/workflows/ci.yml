@@ -1,25 +1,35 @@
 name: CI
 
-on: [push, pull_request]
+on:
+  push:
+    branches: [main, master]
+  pull_request:
 
 jobs:
-  check:
+  server:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: apps/server
     steps:
       - uses: actions/checkout@v4
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: latest
-      - name: Server — install, typecheck, tests
-        working-directory: apps/server
-        run: |
-          bun install
-          bun run typecheck
-          bun run test
-      - name: Client — install, unit tests, build
+      - run: bun install --frozen-lockfile
+      - run: bun test src/orchestration
+      - run: bun run typecheck
+
+  client:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
         working-directory: apps/client
-        run: |
-          bun install
-          bun run test
-          bun run build
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - run: bun install --frozen-lockfile
+      - run: bun test src/utils
+      - run: bun run build

@@ -473,6 +473,10 @@ just test-event
 # Check server/client health
 just health
 
+# Automated CI (same as GitHub Actions on push/PR to main or master)
+cd apps/server && bun install --frozen-lockfile && bun test src/orchestration && bun run typecheck
+cd apps/client && bun install --frozen-lockfile && bun test src/utils && bun run build
+
 # Manual event test
 curl -X POST http://localhost:4000/events \
   -H "Content-Type: application/json" \
